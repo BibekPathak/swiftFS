@@ -137,3 +137,53 @@ versions, bad paths (traversal, trailing slash, `.` components), duplicate
 inodes/paths, malformed hashes, and inconsistent chunk tiling, and bounds
 `chunk_size` to `1..=64 MiB` so validation never allocates from an
 attacker-controlled size.
+
+## D12. Immutable in-memory index, no locks on the read path (Phase 3)
+
+`ManifestIndex` is built once at mount time from the validated manifest and is
+never mutated. It holds `HashMap`s for inode→node, (parent, name)→inode, and
+inode→children, plus sorted child lists for stable `readdir`. Because it is
+immutable, it is shared behind `Arc` with no lock, so no lock is ever held across
+a `read` or a storage fetch. Mount-time work is limited to reading and indexing
+the manifest; no file contents are fetched.
+
+## D13. Synchronous FUSE callbacks bridged to Tokio via oneshot (Phase 3)
+
+For `read`, the FUSE worker thread spawns a fetch task on the `swiftfs-io` Tokio
+runtime and blocks on a `tokio::sync::oneshot` receiver. The runtime worker that
+executes the fetch is never blocked. The FUSE session is configured with
+`n_threads` worker threads so several reads can be outstanding at once, each
+blocking only its own FUSE thread. This is deliberately *not* the
+`experimental::AsyncFilesystem` adapter, which runs futures on the calling
+thread and would give up the disjoint thread pools. Deadlock risk is avoided by
+never awaiting runtime work from inside a callback and by not holding locks
+across the bridge.
+
+## D14. EOF, errors, and read-only semantics (Phase 3)
+
+- Reading at or past EOF returns zero bytes, not an error; a range that starts
+  before EOF and extends past it returns the tail.
+- Writes and creates are rejected with `EROFS`; `open` rejects non-read modes
+  before any storage work.
+- A missing object maps to `ENOENT`; a truncated or hash-mismatched object maps
+  to `EIO`; unsupported operations map to `EINVAL`.
+- Chunk bytes are hash-verified in the `read` path before being served, in
+  addition to `verify` at rest.
+- `getxattr` returns `ENODATA` and `listxattr` reports an empty list, so tools do
+  not treat xattr support as broken.
+
+## D15. Local backend reads on the blocking pool (Phase 3)
+
+`LocalStore` performs synchronous file reads but runs them via
+`tokio::task::spawn_blocking`, so it is safe on both current-thread and
+multi-thread runtimes and never blocks a runtime worker. This replaced an
+initial `block_in_place`, which panics on current-thread runtimes (found via a
+test failure).
+
+## D16. Open fds block unmount (Phase 3)
+
+During integration testing, unmounting while a file handle was still open caused
+the unmount to block. Tests close their handles before unmounting, and this is
+documented as expected FUSE behavior rather than worked around. `swiftfs
+unmount` shells out to `fusermount3` (falling back to `umount`), which handles
+the normal case.

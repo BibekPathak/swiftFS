@@ -11,6 +11,10 @@ description = "Read-only FUSE filesystem daemon and swiftfs CLI"
 name = "swiftfs"
 path = "src/main.rs"
 
+[lib]
+name = "swiftfs_daemon"
+path = "src/lib.rs"
+
 [dependencies]
 swiftfs-core.workspace = true
 swiftfs-format.workspace = true
@@ -23,3 +27,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

@@ -54,9 +54,11 @@ validation for untrusted manifests. See [`image-format.md`](image-format.md).
 ### swiftfs-storage
 
 A `ChunkLocation` describes where a chunk lives (object key, offset, length).
-Backends implement fetching those ranges. Phase 4 adds a local directory backend
-and an HTTP byte-range backend with validation, timeouts, bounded retries, and
-hash verification.
+Backends implement the async `ChunkStore` trait, returning exactly the requested
+bytes or an error. Phase 3 implements a local directory backend; Phase 4 adds an
+HTTP byte-range backend with validation, timeouts, bounded retries, and hash
+verification. The local backend runs its synchronous reads on Tokio's blocking
+pool so runtime worker threads are never blocked.
 
 ### swiftfs-cache
 
@@ -67,7 +69,9 @@ fetch. Phase 4.
 ### swiftfs-daemon
 
 The FUSE filesystem implementing `lookup`, `getattr`, `readdir`, `open`, `read`,
-`release`, `init`, and `destroy`. Also hosts the `swiftfs` CLI.
+`release`, `flush`, `getxattr`, `listxattr`, `statfs`, `init`, and `destroy`.
+Also hosts the `swiftfs` CLI and the `ManifestIndex` used to resolve paths,
+directory listings, and chunk ranges.
 
 ### swiftfs-bench
 
@@ -92,7 +96,12 @@ read:    FUSE read(ino, offset, size)
 
 `fuser` 0.18 exposes a **synchronous** `Filesystem` trait (`Send + Sync +
 'static`) whose methods receive a `reply` handle. SwiftFS runs storage work on a
-dedicated Tokio multi-threaded runtime and bridges it to the synchronous FUSE
-callbacks by blocking the FUSE worker thread on a runtime handle, never by
-blocking a Tokio worker thread. Full details and safety reasoning are in
+dedicated Tokio multi-threaded runtime (`swiftfs-io`) and bridges it to the
+synchronous FUSE callbacks by blocking the FUSE worker thread on a `oneshot`
+channel while the fetch runs as a Tokio task. It never blocks a Tokio worker
+thread and never awaits from inside a callback.
+
+The `fuser` session itself is configured with `n_threads` worker threads (Linux
+only), so multiple FUSE requests can be in flight concurrently; each may block
+its own worker while awaiting storage. Full details and safety reasoning are in
 [`design-decisions.md`](design-decisions.md).

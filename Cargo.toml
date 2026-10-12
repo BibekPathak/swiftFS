@@ -45,6 +45,9 @@ clap = { version = "4.6.7", features = ["derive"] }
 tempfile = "3"
 proptest = "1"
 
+# Async trait objects
+async-trait = "0.1"
+
 # Internal crates
 swiftfs-core = { path = "crates/swiftfs-core" }
 swiftfs-format = { path = "crates/swiftfs-format" }

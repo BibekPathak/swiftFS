@@ -1,7 +1,7 @@
 //! `swiftfs` command-line entry point.
 //!
-//! Phase 2 implements `build`, `inspect`, and `verify`. `mount`/`unmount`
-//! arrive in Phase 3 and `bench` in Phase 6.
+//! Phase 3 implements `build`, `inspect`, `verify`, `mount`, and `unmount`.
+//! `bench` arrives in Phase 6.
 
 use clap::{Parser, Subcommand};
 use swiftfs_format::{build_image, inspect_image, verify_image, BuildOptions};
@@ -48,6 +48,12 @@ enum Command {
         image: std::path::PathBuf,
         /// Mountpoint.
         target: std::path::PathBuf,
+        /// Allow other users to access the mount.
+        #[arg(long)]
+        allow_other: bool,
+        /// Number of FUSE worker threads (Linux only).
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
     },
     /// Cleanly unmount a mounted SwiftFS filesystem.
     Unmount {
@@ -85,8 +91,13 @@ fn main() -> anyhow::Result<()> {
         } => command_build(source, output, chunk_size),
         Command::Inspect { image } => command_inspect(image),
         Command::Verify { image } => command_verify(image),
-        Command::Mount { .. } => anyhow::bail!("`mount` is implemented in Phase 3"),
-        Command::Unmount { .. } => anyhow::bail!("`unmount` is implemented in Phase 3"),
+        Command::Mount {
+            image,
+            target,
+            allow_other,
+            threads,
+        } => command_mount(image, target, allow_other, threads),
+        Command::Unmount { target } => command_unmount(target),
         Command::Bench { workload } => {
             anyhow::bail!("`bench {workload}` is implemented in Phase 6")
         }
@@ -132,4 +143,51 @@ fn command_verify(image: std::path::PathBuf) -> anyhow::Result<()> {
         s.scanned_objects, s.scanned_chunks
     );
     Ok(())
+}
+
+fn command_mount(
+    image: std::path::PathBuf,
+    target: std::path::PathBuf,
+    allow_other: bool,
+    threads: usize,
+) -> anyhow::Result<()> {
+    let mut config = swiftfs_daemon::MountConfig::new(image, target);
+    config.allow_other = allow_other;
+    config.n_threads = threads;
+    swiftfs_daemon::mount_image(&config)?;
+    Ok(())
+}
+
+fn command_unmount(target: std::path::PathBuf) -> anyhow::Result<()> {
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("mountpoint path is not valid UTF-8"))?;
+
+    for cmd in ["fusermount3", "fusermount"] {
+        match std::process::Command::new(cmd)
+            .arg("-u")
+            .arg(target_str)
+            .status()
+        {
+            Ok(status) if status.success() => {
+                println!("Unmounted {target_str}");
+                return Ok(());
+            }
+            Ok(status) => anyhow::bail!("{cmd} -u {target_str} failed with {status}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    match std::process::Command::new("umount")
+        .arg(target_str)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!("Unmounted {target_str}");
+            Ok(())
+        }
+        Ok(status) => anyhow::bail!("umount {target_str} failed with {status}"),
+        Err(e) => anyhow::bail!("no unmount tool available (fusermount3/umount): {e}"),
+    }
 }
