@@ -8,10 +8,12 @@ time to first process execution and time to first inference for large container
 images and ML model artifacts, compared with eagerly downloading and extracting
 everything up front.
 
-> **Status: Phase 1 (foundation) complete.** The workspace builds and the design
-> is documented. The image format, FUSE mount, storage backends, caching, and
-> benchmarks are implemented in later phases. This README does **not** yet claim
-> working end-to-end behavior.
+> **Status: Phase 2 (image format and builder) complete.** The `swiftfs build`,
+> `inspect`, and `verify` commands work against the local image layout, with
+> tests covering chunking, deduplication, byte-range correctness, and corruption
+> detection. The FUSE mount, storage backends, caching, and benchmarks are
+> implemented in later phases. `mount`/`unmount`, the HTTP backend, and
+> benchmarks are **not** yet functional.
 
 ## Documentation
 
@@ -56,7 +58,25 @@ swiftfs verify  <image>
 swiftfs bench   [workload]
 ```
 
-Subcommands currently report that they are implemented in a later phase.
+Subcommands `build`, `inspect`, and `verify` are implemented. `mount`,
+`unmount`, and `bench` report that they are implemented in a later phase.
+
+### End-to-end example (Phase 2)
+
+```sh
+# Create some content and build an image.
+mkdir -p /tmp/myroot/sub
+echo "hello" > /tmp/myroot/hello.txt
+head -c 2097153 /dev/urandom > /tmp/myroot/sub/big.bin
+
+swiftfs build /tmp/myroot /tmp/myimage --chunk-size 1048576
+swiftfs inspect /tmp/myimage
+swiftfs verify  /tmp/myimage
+```
+
+`build` writes `manifest.json` and content-addressed chunk objects under
+`chunks/`, deduplicating identical chunks and rejecting symlinks and special
+files. It refuses to clobber a non-empty output directory.
 
 ## License
 

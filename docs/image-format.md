@@ -8,12 +8,15 @@ read many times.
 image/
 ├── manifest.json          # versioned manifest (see below)
 └── chunks/                # content-addressed chunk objects
-    ├── <hash>             # optionally grouped, one file per unique chunk
+    ├── <blake3-hash>      # one file per unique chunk, filename = hash
     └── ...
 ```
 
-> This document defines the Phase 1 schema. The concrete serde structs and
-> builder land in Phase 2; the field set below is the contract they implement.
+> This document reflects the implemented Phase 2 schema. In format v1, one
+> chunk object holds exactly one chunk, so `object` equals the chunk hash and
+> `object_offset` is always `0`. Deduplication reuses the same object file for
+> identical content. The `object`/`object_offset` fields exist so a future
+> version can pack multiple chunks per object without a schema change.
 
 ## Manifest
 

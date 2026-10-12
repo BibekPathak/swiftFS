@@ -108,3 +108,32 @@ replacement for a secure container runtime.
 
 Benchmark and profiling reports will state which tools were actually used and
 which were unavailable, rather than implying profiling that did not happen.
+
+## D9. Format v1 chunk-object layout (Phase 2)
+
+In format v1 each chunk object holds exactly one chunk, named by its BLAKE3 hex
+hash, so `object == hash` and `object_offset == 0`. Deduplication reuses the
+object file for identical content. This is the simplest correct layout and makes
+`verify` trivially hash whole files. The `object`/`object_offset` schema fields
+are retained so a later version can pack many chunks into one object without a
+format-version break for readers that already understand the fields.
+
+## D10. Atomic build and non-clobbering output (Phase 2)
+
+`build` writes into a per-process staging directory (`.{name}.staging.{pid}`)
+next to the target, fsyncs each object, then renames the staging directory into
+place. The manifest itself is written to `manifest.json.tmp` and renamed after
+`sync_all`. A crash therefore cannot leave a valid-looking partial image. The
+builder refuses a non-empty existing output directory rather than merging into or
+overwriting it, and cleans up staging on any error. A cross-device rename
+fallback copies the tree and removes staging.
+
+## D11. Rejecting unsupported inputs explicitly (Phase 2)
+
+Traversal uses `symlink_metadata` and does not follow symlinks; symlinks and
+special files are rejected with `SwiftfsError::UnsupportedFileType` rather than
+silently skipped or mis-stored. Manifest validation rejects unknown format
+versions, bad paths (traversal, trailing slash, `.` components), duplicate
+inodes/paths, malformed hashes, and inconsistent chunk tiling, and bounds
+`chunk_size` to `1..=64 MiB` so validation never allocates from an
+attacker-controlled size.
