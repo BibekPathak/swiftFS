@@ -1,0 +1,15 @@
+[package]
+name = "swiftfs-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chunk storage backends (local and HTTP) for SwiftFS"
+
+[dependencies]
+swiftfs-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

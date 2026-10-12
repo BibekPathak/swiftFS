@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/swiftfs-core",
+    "crates/swiftfs-format",
+    "crates/swiftfs-storage",
+    "crates/swiftfs-cache",
+    "crates/swiftfs-daemon",
+    "crates/swiftfs-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/swiftfs"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# Hashing
+blake3 = "1.8.7"
+
+# Async runtime and HTTP
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "io-util"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
+
+# FUSE
+fuser = "0.18.0"
+libc = "0.2"
+
+# Logging and errors
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+
+# CLI
+clap = { version = "4.6.7", features = ["derive"] }
+
+# Internal crates
+swiftfs-core = { path = "crates/swiftfs-core" }
+swiftfs-format = { path = "crates/swiftfs-format" }
+swiftfs-storage = { path = "crates/swiftfs-storage" }
+swiftfs-cache = { path = "crates/swiftfs-cache" }
+swiftfs-daemon = { path = "crates/swiftfs-daemon" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

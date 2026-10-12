@@ -1,0 +1,21 @@
+# Default SwiftFS configuration.
+# These values mirror the built-in defaults; provide this file with
+# `--config` once the CLI supports loading it (Phase 3+).
+#
+# chunk_size: size in bytes to split files into (default 1 MiB)
+# ram_cache_bytes: upper bound on in-memory chunk cache
+# disk_cache_dir: optional local disk cache location (null disables it)
+# disk_cache_bytes: upper bound on disk cache size
+# max_concurrent_fetches: bounded outstanding storage requests
+# storage_timeout_ms: per-request timeout
+# read_ahead: enable sequential read-ahead
+# metrics_listen: local metrics endpoint address
+
+chunk_size: 1048576
+ram_cache_bytes: 268435456
+disk_cache_dir: null
+disk_cache_bytes: 1073741824
+max_concurrent_fetches: 32
+storage_timeout_ms: 5000
+read_ahead: true
+metrics_listen: "127.0.0.1:9898"

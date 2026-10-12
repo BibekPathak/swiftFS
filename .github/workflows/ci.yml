@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Formatting, linting, and tests that do NOT require FUSE or privileges.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test (unprivileged)
+        run: cargo test --workspace --exclude swiftfs-daemon
+
+  # FUSE integration tests run only on a runner with /dev/fuse available.
+  # Marked separately so unprivileged CI still gates the build.
+  fuse-integration:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure FUSE
+        run: |
+          sudo apt-get update && sudo apt-get install -y fuse3
+          test -e /dev/fuse
+      - name: FUSE integration tests
+        run: cargo test -p swiftfs-daemon -- --ignored
+        continue-on-error: false

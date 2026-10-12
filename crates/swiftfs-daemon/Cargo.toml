@@ -1,0 +1,25 @@
+[package]
+name = "swiftfs-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read-only FUSE filesystem daemon and swiftfs CLI"
+
+[[bin]]
+name = "swiftfs"
+path = "src/main.rs"
+
+[dependencies]
+swiftfs-core.workspace = true
+swiftfs-format.workspace = true
+swiftfs-storage.workspace = true
+swiftfs-cache.workspace = true
+fuser.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true

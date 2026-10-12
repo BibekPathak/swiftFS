@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.swp
+
+# Local build artifacts and runtime data
+/images/
+/mnt/
+/data/
+*.manifest.json
+*.swiftfs.img
+/docs/_build/
+/bench-results/*.local.*

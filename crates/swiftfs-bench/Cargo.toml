@@ -1,0 +1,23 @@
+[package]
+name = "swiftfs-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Benchmark and workload harness comparing eager extraction with SwiftFS"
+
+[[bin]]
+name = "swiftfs-bench"
+path = "src/main.rs"
+
+[dependencies]
+swiftfs-core.workspace = true
+swiftfs-format.workspace = true
+swiftfs-storage.workspace = true
+swiftfs-cache.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true

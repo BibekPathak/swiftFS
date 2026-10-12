@@ -1,0 +1,12 @@
+[package]
+name = "swiftfs-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types and shared errors for SwiftFS"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
