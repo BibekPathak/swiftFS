@@ -12,27 +12,38 @@
 //! from inside a callback. Because the fetch is spawned onto the runtime, the
 //! blocking wait is bounded by the storage timeout enforced in the backend
 //! (Phase 4). This design keeps the FUSE and Tokio thread pools disjoint.
-//!
+//
 //! All manifest-derived state (`ManifestIndex`) is immutable and shared via
-//! `Arc`, so no lock is held across a `read`. In Phase 3 there is no cache; each
-//! read fetches its chunks directly. Caching and coalescing arrive in Phase 4.
+//! `Arc`, so no lock is held across a `read`. Caching and single-flight
+//! coalescing are provided by the `ChunkFetcher`, which deduplicates concurrent
+//! requests for the same chunk across the RAM cache, disk cache, and backend.
 
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
-    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+    consts, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
     KernelConfig, LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
 use swiftfs_core::{Result as SfsResult, SwiftfsError, DEFAULT_CHUNK_SIZE};
 use swiftfs_format::{hash_bytes, Node, NodeKind};
 use swiftfs_storage::{ChunkLocation, ChunkStore};
+use swiftfs_cache::{ChunkFetcher, FetcherConfig, RamCache, DiskCache};
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
 use crate::index::ManifestIndex;
+
+/// Basename of an absolute path.
+fn basename(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    }
+}
+
 
 /// Attribute / entry cache TTL. The image is immutable, so entries may be
 /// cached aggressively.
@@ -41,28 +52,33 @@ const TTL: Duration = Duration::from_secs(3600);
 /// Read-only SwiftFS filesystem.
 pub struct Swiftfs {
     index: Arc<ManifestIndex>,
-    store: Arc<dyn ChunkStore>,
+    fetcher: Arc<ChunkFetcher>,
     rt: Handle,
     uid: u32,
     gid: u32,
 }
 
 impl Swiftfs {
-    /// Construct a filesystem from an index, a chunk store, and a Tokio handle.
+    /// Construct a filesystem from an index, a fetcher, and a Tokio handle.
     pub fn new(
         index: Arc<ManifestIndex>,
-        store: Arc<dyn ChunkStore>,
+        fetcher: Arc<ChunkFetcher>,
         rt: Handle,
         mount_uid: u32,
         mount_gid: u32,
     ) -> Self {
         Self {
             index,
-            store,
+            fetcher,
             rt,
             uid: mount_uid,
             gid: mount_gid,
         }
+    }
+
+    /// The underlying fetcher (for metrics and tests).
+    pub fn fetcher(&self) -> &Arc<ChunkFetcher> {
+        &self.fetcher
     }
 
     /// Build `FileAttr` for a node.
@@ -91,7 +107,9 @@ impl Swiftfs {
         }
     }
 
-    /// Fetch and verify all chunks covering a byte range, reassembling them.
+    /// Fetch and verify all chunks covering a byte range, reassembling them,
+    /// using the `ChunkFetcher` (which includes RAM + disk caches and
+    /// single-flight coalescing).
     ///
     /// Runs on the FUSE worker thread; internally blocks on the Tokio runtime
     /// (see the module-level threading note).
@@ -101,48 +119,36 @@ impl Swiftfs {
             return Ok(Vec::new());
         }
 
-        let mut out = Vec::with_capacity(size as usize);
-        for piece in plan {
-            let location = ChunkLocation {
-                object: piece.chunk.object.clone(),
-                offset: piece.chunk.object_offset,
-                length: piece.chunk.length,
-            };
-            let expected_hash = piece.chunk.hash.clone();
-            let store = Arc::clone(&self.store);
-
-            // Spawn the async fetch on the runtime; block this FUSE worker on
-            // the oneshot result. The runtime handle is not blocked.
-            let data = {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                self.rt.spawn(async move {
-                    let res = store.fetch(&location).await;
-                    let _ = tx.send(res);
-                });
-                rx.blocking_recv()
-                    .map_err(|_| SwiftfsError::Storage("storage task cancelled".to_string()))??
-            };
-
-            // Verify integrity before serving bytes.
-            let actual = hash_bytes(&data);
-            if actual != expected_hash {
-                return Err(SwiftfsError::IntegrityFailure(format!(
-                    "chunk {}: expected {}, got {}",
-                    piece.chunk.object, expected_hash, actual
-                )));
-            }
-
-            let start = piece.in_chunk_offset as usize;
-            let end = start + piece.len as usize;
-            if end > data.len() {
-                return Err(SwiftfsError::IntegrityFailure(format!(
-                    "chunk {} shorter than expected",
-                    piece.chunk.object
-                )));
-            }
-            out.extend_from_slice(&data[start..end]);
-        }
-        Ok(out)
+        // Block on the runtime to perform the async fetches with caching/coalescing.
+        // This is safe: the FUSE worker thread blocking is bounded by the fetch
+        /// timeout, and the Tokio runtime is dedicated to this filesystem.
+        let data = tokio::task::block_in_place(|| {
+            self.rt.block_on(async {
+                let mut out = Vec::with_capacity(size as usize);
+                for piece in plan {
+                    let location = ChunkLocation {
+                        object: piece.chunk.object.clone(),
+                        offset: piece.chunk.object_offset,
+                        length: piece.chunk.length,
+                    };
+let arc_data = self.fetcher.get(&piece.chunk.object, &location).await?;
+                    // `?` inside the async block is fine.
+                    // ChunkBytes = Arc<Vec<u8>; clone to get owned Vec<u8>.
+                    let data = arc_data.clone();
+                    let start = piece.in_chunk_offset as usize;
+                    let end = start + piece.len as usize;
+                    if end > data.len() {
+                        return Err(SwiftfsError::IntegrityFailure(format!(
+                            "chunk {} shorter than expected",
+                            piece.chunk.object
+                        )));
+                    }
+                    out.extend_from_slice(&data[start..end]);
+                }
+                Ok(out)
+            })
+        })?;
+        Ok(data)
     }
 }
 
@@ -151,9 +157,9 @@ fn errno_for(err: &SwiftfsError) -> Errno {
     match err {
         SwiftfsError::ChunkNotFound(_) | SwiftfsError::PathRejected(_) => Errno::ENOENT,
         SwiftfsError::UnsupportedFileType(_) => Errno::EINVAL,
-        SwiftfsError::IntegrityFailure(_)
-        | SwiftfsError::Storage(_)
-        | SwiftfsError::InvalidImage(_) => Errno::EIO,
+        SwiftfsError::IntegrityFailure(_) | SwiftfsError::Storage(_) | SwiftfsError::InvalidImage(_) => {
+            Errno::EIO
+        }
         SwiftfsError::Io(e) => Errno::from(e.kind()),
     }
 }
@@ -335,13 +341,5 @@ impl Filesystem for Swiftfs {
     fn listxattr(&self, _req: &Request, _ino: INodeNo, _size: u32, reply: ReplyXattr) {
         // No extended attributes: report an empty list.
         reply.size(0);
-    }
-}
-
-/// Basename of an absolute path.
-fn basename(path: &str) -> &str {
-    match path.rfind('/') {
-        Some(i) => &path[i + 1..],
-        None => path,
     }
 }

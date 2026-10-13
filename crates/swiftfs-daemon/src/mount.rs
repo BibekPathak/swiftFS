@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fuser::{Config, MountOption, Session, SessionACL};
+use swiftfs_cache::{ChunkFetcher, FetcherConfig, RamCache};
 use swiftfs_format::load_manifest;
 use swiftfs_storage::{ChunkStore, LocalStore};
 use tracing::{info, warn};
@@ -57,6 +58,22 @@ pub enum MountError {
     Runtime(String),
 }
 
+fn build_chunk_fetcher(
+    store: Arc<dyn ChunkStore>,
+    _disk_cache_config: Option<(PathBuf, u64)>,
+) -> Arc<ChunkFetcher> {
+    let ram = Arc::new(RamCache::new(256 * 1024 * 1024)); // 256 MiB RAM cache;
+
+    let fetcher_config = FetcherConfig::default();
+
+    Arc::new(ChunkFetcher::new(
+        store,
+        ram,
+        None,
+        fetcher_config,
+    ))
+}
+
 /// Mount `config.image` at `config.target`, blocking until the filesystem is
 /// unmounted.
 ///
@@ -91,9 +108,26 @@ pub fn mount_image(config: &MountConfig) -> Result<(), MountError> {
     // and no memory-safety implications. They cannot fail on Linux.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
 
-    let fs = Swiftfs::new(index, store, handle, uid, gid);
+    let fetcher = build_chunk_fetcher(store, None);
 
-    let fuser_config = build_fuser_config(config);
+    let mut fuser_config = Config::default();
+    fuser_config.mount_options = vec![
+        MountOption::RO,
+        MountOption::FSName("swiftfs".to_string()),
+        MountOption::DefaultPermissions,
+    ];
+    if config.allow_other {
+        fuser_config.mount_options.push(MountOption::AutoUnmount);
+        fuser_config.acl = SessionACL::All;
+    } else {
+        fuser_config.acl = SessionACL::Owner;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fuser_config.n_threads = Some(config.n_threads.max(1));
+    }
+
+    let fs = Swiftfs::new(index, fetcher, handle, uid, gid);
 
     let session = Session::new(fs, &config.target, &fuser_config)?;
     info!(target = %config.target.display(), "filesystem mounted");
@@ -157,10 +191,28 @@ pub fn mount_image_background(config: &MountConfig) -> Result<MountedHandle, Mou
     // SAFETY: `getuid`/`getgid` are infallible FFI calls with no preconditions
     // and no memory-safety implications.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let fs = Swiftfs::new(index, store, handle, uid, gid);
 
-    let mut fuser_config = build_fuser_config(config);
-    fuser_config.mount_options.push(MountOption::RO);
+    let fetcher = build_chunk_fetcher(store, None);
+
+    let mut fuser_config = Config::default();
+    fuser_config.mount_options = vec![
+        MountOption::RO,
+        MountOption::FSName("swiftfs".to_string()),
+        MountOption::DefaultPermissions,
+    ];
+    if config.allow_other {
+        fuser_config.mount_options.push(MountOption::AutoUnmount);
+        fuser_config.acl = SessionACL::All;
+    } else {
+        fuser_config.acl = SessionACL::Owner;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fuser_config.n_threads = Some(config.n_threads.max(1));
+    }
+
+    let fs = Swiftfs::new(index, fetcher, handle, uid, gid);
+
     let session = Session::new(fs, &config.target, &fuser_config)?.spawn()?;
 
     Ok(MountedHandle { session, runtime })

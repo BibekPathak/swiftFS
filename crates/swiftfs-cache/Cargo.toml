@@ -9,6 +9,13 @@ description = "Bounded multi-level caching with single-flight coalescing for Swi
 
 [dependencies]
 swiftfs-core.workspace = true
+swiftfs-storage.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

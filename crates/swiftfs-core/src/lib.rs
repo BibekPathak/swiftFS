@@ -7,6 +7,8 @@
 /// Size of a SwiftFS chunk in bytes unless overridden at build time.
 pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
 
+pub mod metrics;
+
 /// Stable, in-memory inode number assigned to the filesystem root.
 pub const ROOT_INODE: u64 = 1;
 

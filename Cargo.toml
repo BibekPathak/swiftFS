@@ -47,6 +47,7 @@ proptest = "1"
 
 # Async trait objects
 async-trait = "0.1"
+futures = "0.3"
 
 # Internal crates
 swiftfs-core = { path = "crates/swiftfs-core" }
