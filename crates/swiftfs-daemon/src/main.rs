@@ -51,9 +51,40 @@ enum Command {
         /// Allow other users to access the mount.
         #[arg(long)]
         allow_other: bool,
+        /// Automatically unmount when the mounting process exits.
+        #[arg(long)]
+        auto_unmount: bool,
         /// Number of FUSE worker threads (Linux only).
         #[arg(long, default_value_t = 4)]
         threads: usize,
+        /// Fetch chunk bytes over HTTP from this base URL instead of reading the
+        /// image's local `chunks/` directory.
+        #[arg(long)]
+        http_base_url: Option<String>,
+        /// Enable a persistent content-addressed disk cache in this directory.
+        #[arg(long)]
+        disk_cache_dir: Option<std::path::PathBuf>,
+        /// Disk cache capacity in bytes (requires --disk-cache-dir).
+        #[arg(long)]
+        disk_cache_bytes: Option<u64>,
+        /// RAM cache capacity in bytes.
+        #[arg(long)]
+        ram_cache_bytes: Option<u64>,
+        /// Maximum concurrent backend fetches.
+        #[arg(long)]
+        concurrent_fetches: Option<usize>,
+        /// Per-request storage timeout in milliseconds.
+        #[arg(long)]
+        storage_timeout_ms: Option<u64>,
+        /// Disable sequential read-ahead.
+        #[arg(long)]
+        no_read_ahead: bool,
+        /// Serve Prometheus metrics on this host:port while mounted.
+        #[arg(long)]
+        metrics_listen: Option<String>,
+        /// Load settings from a YAML config file (flags override config values).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
     /// Cleanly unmount a mounted SwiftFS filesystem.
     Unmount {
@@ -114,8 +145,33 @@ fn main() -> anyhow::Result<()> {
             image,
             target,
             allow_other,
+            auto_unmount,
             threads,
-        } => command_mount(image, target, allow_other, threads),
+            http_base_url,
+            disk_cache_dir,
+            disk_cache_bytes,
+            ram_cache_bytes,
+            concurrent_fetches,
+            storage_timeout_ms,
+            no_read_ahead,
+            metrics_listen,
+            config,
+        } => command_mount(MountArgs {
+            image,
+            target,
+            allow_other,
+            auto_unmount,
+            threads,
+            http_base_url,
+            disk_cache_dir,
+            disk_cache_bytes,
+            ram_cache_bytes,
+            concurrent_fetches,
+            storage_timeout_ms,
+            no_read_ahead,
+            metrics_listen,
+            config,
+        }),
         Command::Unmount { target } => command_unmount(target),
         Command::Bench {
             workload,
@@ -178,15 +234,64 @@ fn command_verify(image: std::path::PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn command_mount(
+struct MountArgs {
     image: std::path::PathBuf,
     target: std::path::PathBuf,
     allow_other: bool,
+    auto_unmount: bool,
     threads: usize,
-) -> anyhow::Result<()> {
-    let mut config = swiftfs_daemon::MountConfig::new(image, target);
-    config.allow_other = allow_other;
-    config.n_threads = threads;
+    http_base_url: Option<String>,
+    disk_cache_dir: Option<std::path::PathBuf>,
+    disk_cache_bytes: Option<u64>,
+    ram_cache_bytes: Option<u64>,
+    concurrent_fetches: Option<usize>,
+    storage_timeout_ms: Option<u64>,
+    no_read_ahead: bool,
+    metrics_listen: Option<String>,
+    config: Option<std::path::PathBuf>,
+}
+
+fn command_mount(args: MountArgs) -> anyhow::Result<()> {
+    let mut config = swiftfs_daemon::MountConfig::new(args.image, args.target);
+
+    // 1. Apply the config file first, so explicit flags can override it.
+    if let Some(path) = &args.config {
+        let file =
+            swiftfs_daemon::config::load(path).map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+        swiftfs_daemon::config::apply(&file, &mut config);
+    }
+
+    // 2. Explicit CLI flags override config-file values.
+    config.allow_other = args.allow_other;
+    config.auto_unmount = args.auto_unmount;
+    config.n_threads = args.threads;
+    if let Some(url) = args.http_base_url {
+        config.backend = swiftfs_daemon::mount::Backend::Http { base_url: url };
+    }
+    if let Some(dir) = args.disk_cache_dir {
+        config.disk_cache = Some(swiftfs_daemon::mount::DiskCacheConfig {
+            dir,
+            capacity_bytes: args.disk_cache_bytes.unwrap_or(1024 * 1024 * 1024),
+        });
+    } else if args.disk_cache_bytes.is_some() {
+        anyhow::bail!("--disk-cache-bytes requires --disk-cache-dir");
+    }
+    if let Some(b) = args.ram_cache_bytes {
+        config.ram_cache_bytes = b;
+    }
+    if let Some(n) = args.concurrent_fetches {
+        config.max_concurrent_fetches = n;
+    }
+    if let Some(ms) = args.storage_timeout_ms {
+        config.storage_timeout = std::time::Duration::from_millis(ms);
+    }
+    if args.no_read_ahead {
+        config.read_ahead = false;
+    }
+    if let Some(addr) = args.metrics_listen {
+        config.metrics_listen = Some(addr);
+    }
+
     swiftfs_daemon::mount_image(&config)?;
     Ok(())
 }

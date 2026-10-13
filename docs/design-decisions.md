@@ -82,11 +82,15 @@ what is deliberately unsupported rather than implying write support.
 
 ## D6. HTTP backend without a cloud account
 
-The HTTP backend performs byte-range GETs against any HTTP server. Tests use a
-local mock server; no paid cloud account is required. Documented server
-requirements: support for `Range` requests (`206 Partial Content`) and correct
-`Content-Length` on partial responses. Backends fall back to whole-object fetch
-only if range support is provably absent, and this is documented, not silent.
+The HTTP backend performs byte-range GETs against any HTTP server. Integration
+tests run against a local mock server implemented on a `TcpListener` (no
+external dependency, loopback only); no paid cloud account is required.
+Documented server requirements: support for `Range` requests (`206 Partial
+Content`) and correct `Content-Length` on partial responses. If a server ignores
+`Range` and returns `200 OK`, the response is rejected unless the body length
+exactly matches the requested chunk — SwiftFS will not silently download a
+whole (possibly huge) object. The `Content-Range` header, when present, is
+validated against the requested byte span.
 
 ## D7. Security boundary
 
@@ -232,3 +236,36 @@ clear message otherwise.
 Rather than duplicate measurement logic, `swiftfs-bench` depends on
 `swiftfs-daemon` and calls the same `run_benchmark`/`run_full_suite`. The main
 `swiftfs bench` subcommand and the standalone binary therefore cannot drift.
+
+## D20. Storage backends and caches are selected at mount time
+
+`MountConfig` carries a `Backend` (`Local` or `Http { base_url }`), an optional
+`DiskCacheConfig`, a RAM-cache byte budget, a fetch concurrency bound, and a
+storage timeout. `mount` exposes all of these as flags (`--http-base-url`,
+`--disk-cache-dir`, `--disk-cache-bytes`, `--ram-cache-bytes`,
+`--concurrent-fetches`, `--storage-timeout-ms`). Previously the HTTP backend and
+disk cache existed as tested library code but the daemon hardcoded `LocalStore`
+and `None`; that gap is closed, and both paths are exercised by tests and
+manual verification.
+
+## D21. Optional Prometheus metrics endpoint
+
+`--metrics-listen HOST:PORT` starts a small thread serving `GET /metrics` in
+Prometheus text format. The body is rendered from the live `ChunkFetcher`
+counters and the chunk-latency histogram — the same metrics the read path
+updates. The server is a plain `TcpListener` (no async runtime, no new
+dependencies), read-only, and stops when the mount ends. Metrics are also
+printed by `swiftfs bench`.
+
+## D22. Config file and `--allow-other` correction
+
+`--config FILE` loads a flat `key: value` YAML-subset (no full YAML dependency;
+unknown keys are ignored with a warning). Explicit flags override file values,
+so a config file sets defaults and the command line can refine them.
+
+The `--allow-other` flag previously pushed `MountOption::AutoUnmount` instead of
+an allow-other option, and `auto_unmount` was applied unconditionally. This is
+corrected: `--allow-other` adds the `allow_other` mount option, `--auto-unmount`
+independently controls `AutoUnmount`, and the session ACL is `All` only when
+`allow_other` is set. (`fuser` 0.18 dropped typed `AllowOther`/`AllowRoot`
+variants, so the option is passed via `MountOption::CUSTOM("allow_other")`.)

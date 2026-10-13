@@ -1,23 +1,23 @@
 # Default SwiftFS configuration.
-# These values mirror the built-in defaults. The CLI does not yet load config
-# files; pass the corresponding flags (e.g. `--chunk-size`, `--ram-cache-bytes`,
-# `--no-read-ahead`) instead. This file documents the defaults and the intended
-# future `--config` surface.
+# Load with `swiftfs mount --config config/default.yaml ...`. Explicit CLI flags
+# override values from this file. Keys not listed here are ignored.
 #
-# chunk_size: size in bytes to split files into (default 1 MiB)
+# chunk_size: size in bytes to split files into (used by `build`, not `mount`)
 # ram_cache_bytes: upper bound on in-memory chunk cache
 # disk_cache_dir: optional local disk cache location (null disables it)
 # disk_cache_bytes: upper bound on disk cache size
 # max_concurrent_fetches: bounded outstanding storage requests
 # storage_timeout_ms: per-request timeout
 # read_ahead: enable sequential read-ahead
-# metrics_listen: local metrics endpoint address
+# metrics_listen: local Prometheus metrics endpoint address (null disables it)
+# http_base_url: fetch chunks over HTTP from this base URL instead of locally
 
 chunk_size: 1048576
 ram_cache_bytes: 268435456
 disk_cache_dir: null
 disk_cache_bytes: 1073741824
 max_concurrent_fetches: 32
-storage_timeout_ms: 5000
+storage_timeout_ms: 15000
 read_ahead: true
-metrics_listen: "127.0.0.1:9898"
+metrics_listen: null
+http_base_url: null

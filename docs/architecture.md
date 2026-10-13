@@ -55,23 +55,26 @@ validation for untrusted manifests. See [`image-format.md`](image-format.md).
 
 A `ChunkLocation` describes where a chunk lives (object key, offset, length).
 Backends implement the async `ChunkStore` trait, returning exactly the requested
-bytes or an error. Phase 3 implements a local directory backend; Phase 4 adds an
-HTTP byte-range backend with validation, timeouts, bounded retries, and hash
-verification. The local backend runs its synchronous reads on Tokio's blocking
-pool so runtime worker threads are never blocked.
+bytes or an error: a local directory backend and an HTTP byte-range backend with
+validation, timeouts, bounded retries, and hash verification. The backend is
+selected per mount (`Backend::Local` by default, or `Backend::Http` via
+`--http-base-url`). The local backend runs its synchronous reads on Tokio's
+blocking pool so runtime worker threads are never blocked.
 
 ### swiftfs-cache
 
 A capacity-bounded RAM cache, an optional atomic disk cache, and single-flight
 coalescing so that concurrent requests for the same missing chunk share one
-fetch. Phase 4.
+fetch. Both caches are wired into the mount path: the RAM budget via
+`--ram-cache-bytes` and the disk cache via `--disk-cache-dir`.
 
 ### swiftfs-daemon
 
 The FUSE filesystem implementing `lookup`, `getattr`, `readdir`, `open`, `read`,
 `release`, `flush`, `getxattr`, `listxattr`, `statfs`, `init`, and `destroy`.
-Also hosts the `swiftfs` CLI and the `ManifestIndex` used to resolve paths,
-directory listings, and chunk ranges.
+Also hosts the `swiftfs` CLI, the `ManifestIndex` used to resolve paths,
+directory listings, and chunk ranges, the config-file loader, and the optional
+Prometheus metrics endpoint (`--metrics-listen`).
 
 ### swiftfs-bench
 

@@ -8,13 +8,17 @@
 #![deny(unsafe_code)]
 
 pub mod benchmark;
+pub mod config;
 pub mod fs;
 pub mod index;
+pub mod metrics_server;
 pub mod mount;
 pub mod read_ahead;
 
 pub use benchmark::{run_benchmark, run_full_suite, BenchConfig, BenchmarkResult};
 pub use fs::Swiftfs;
 pub use index::{ChunkRead, ManifestIndex};
-pub use mount::mount_image_background;
-pub use mount::{mount_image, MountConfig, MountError};
+pub use mount::{
+    mount_image, mount_image_background, Backend, DiskCacheConfig, MountConfig, MountError,
+    MountedHandle,
+};

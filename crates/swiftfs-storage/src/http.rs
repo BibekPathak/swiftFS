@@ -227,13 +227,16 @@ impl HttpStore {
             )));
         }
 
-        // Validate the Content-Range length if present.
+        // Validate the Content-Range span if present: the number of bytes the
+        // server says it returned must equal what we asked for. We validate the
+        // span (END-START+1), not the total object length, because a chunk may
+        // be a sub-range of a larger object.
         if let Some(cr) = resp.headers().get(CONTENT_RANGE) {
             if let Ok(s) = cr.to_str() {
-                if let Some(total_len) = parse_content_range_len(s) {
-                    if total_len != u64::from(expect_len) {
+                if let Some(span) = parse_content_range_span(s) {
+                    if span != u64::from(expect_len) {
                         return Err(SwiftfsError::IntegrityFailure(format!(
-                            "Content-Range length {total_len} != expected {expect_len} for {url}"
+                            "Content-Range span {span} != expected {expect_len} for {url}"
                         )));
                     }
                 }
@@ -257,10 +260,19 @@ impl HttpStore {
     }
 }
 
-/// Parse the length from a `Content-Range: bytes START-END/LEN` header.
-fn parse_content_range_len(value: &str) -> Option<u64> {
-    let total = value.rsplit('/').next()?;
-    total.trim().parse::<u64>().ok()
+/// Parse the byte span from a `Content-Range: bytes START-END/LEN` header,
+/// returning `END - START + 1`. Returns `None` for `*` totals or malformed
+/// headers.
+fn parse_content_range_span(value: &str) -> Option<u64> {
+    let rest = value.strip_prefix("bytes")?.trim();
+    let range = rest.split('/').next()?;
+    let (start, end) = range.split_once('-')?;
+    let start: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
+    if end < start {
+        return None;
+    }
+    Some(end - start + 1)
 }
 
 #[cfg(test)]
@@ -268,10 +280,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_content_range_length() {
-        assert_eq!(parse_content_range_len("bytes 0-9/100"), Some(100));
-        assert_eq!(parse_content_range_len("bytes 5-14/*"), None);
-        assert_eq!(parse_content_range_len("garbage"), None);
+    fn parses_content_range_span() {
+        assert_eq!(parse_content_range_span("bytes 0-9/100"), Some(10));
+        assert_eq!(parse_content_range_span("bytes 5-14/100"), Some(10));
+        assert_eq!(parse_content_range_span("bytes 10-15/256"), Some(6));
+        assert_eq!(parse_content_range_span("bytes 0-255/*"), Some(256));
+        assert_eq!(parse_content_range_span("garbage"), None);
+        assert_eq!(parse_content_range_span("bytes 9-5/100"), None);
     }
 
     #[test]

@@ -18,14 +18,16 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install fuse3 (needed to build/link the daemon)
+        run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
         run: cargo build --workspace
-      - name: Test (unprivileged)
-        run: cargo test --workspace --exclude swiftfs-daemon
+      - name: Test (unprivileged, non-FUSE)
+        run: cargo test --workspace
 
   # FUSE integration tests run only on a runner with /dev/fuse available.
   # Marked separately so unprivileged CI still gates the build.

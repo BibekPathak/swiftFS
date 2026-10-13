@@ -26,21 +26,22 @@ controlled cache state.
 - **W7.** Concurrent reads from 3 processes (20 files each, overlapping access)
 - **W8.** Model-artifact dataset (hot 2 MiB weights + 50 cold 1 KiB files)
 
-## Metrics (recorded per workload, per configuration, across N≥3 iterations)
+## Metrics
 
-- `mount_time_s`          Time to prepare and mount the SwiftFS image
-- `prep_time_s`           Eager extraction preparation time
-- `ttfa_s`                Time to first successful file access (first `dd` read)
-- `warmup_time_s`         Time for cache warm-up phase
-- `total_time_s`          Total benchmark execution time
-- `throughput_mb_s`       Throughput in MiB/s during read phase
-- `p50_latency_ms`        50th percentile read latency
-- `p99_latency_ms`        99th percentile read latency
-- `peak_rss_kb`           Peak resident set size during benchmark (best effort)
-- `cache_hit_rate`        Fraction of reads served from RAM cache (0.0 - 1.0)
-- `storage_requests`      Number of backend storage (HTTP/Disk) requests
-- `bytes_fetched`         Total bytes fetched from backend
-- `read_ahead_ratio`      Ratio of prefetched bytes that were actually used
+The harness emits exactly these fields (per workload, across `--iterations`
+runs); nothing is fabricated:
+
+- `prep_ms` / `total_ms`   Preparation (build/inspect/verify/mount-load) and total wall-clock time
+- `ttfa_ms`                Time to first chunk read
+- `p50_ms`, `p99_ms`       Read latency percentiles (nearest-rank)
+- `peak_rss`               Peak RSS in bytes, from `/proc/self/status` (`VmHWM`)
+- `cache_hit_rate`         Fraction of reads served without a backend fetch (0..1)
+- `storage_requests`       Backend fetches actually performed
+- `bytes_fetched`          Bytes fetched from the backend
+- `raw`                    Per-workload detail (sample counts, RAM hits, backend fetches, cold/warm comparison)
+
+Metrics such as `throughput_mb_s` and `read_ahead_ratio` are **not** currently
+produced; they are not listed as available.
 
 ## Results Storage
 

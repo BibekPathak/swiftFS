@@ -9,12 +9,14 @@ images and ML model artifacts, compared with eagerly downloading and extracting
 everything up front.
 
 > **Status: feature-complete for the documented scope.** `swiftfs build`,
-> `inspect`, `verify`, `mount`, and `unmount` work, as does `bench`. A mounted
-> image lists directories without fetching file data and reads bytes on demand,
-> verified against BLAKE3 chunk hashes. The HTTP byte-range backend, bounded
-> RAM/disk caches, single-flight request coalescing, metrics, and sequential
-> read-ahead are implemented. `swiftfs bench` reports **real** measurements
-> (it does not fabricate numbers); see [`docs/benchmarking.md`](docs/benchmarking.md).
+> `inspect`, `verify`, `mount`, `unmount`, and `bench` all work. A mounted image
+> lists directories without fetching file data and reads bytes on demand,
+> verified against BLAKE3 chunk hashes. Storage backends (local directory and
+> HTTP byte-range), bounded RAM + optional disk caches, single-flight request
+> coalescing, a Prometheus metrics endpoint, sequential read-ahead, and a
+> config file are all reachable from the CLI. `swiftfs bench` reports **real**
+> measurements (it does not fabricate numbers); see
+> [`docs/benchmarking.md`](docs/benchmarking.md).
 
 ## Documentation
 
@@ -53,13 +55,30 @@ The `swiftfs` binary is scaffolded with the intended subcommands:
 ```
 swiftfs build   <source> <output> [--chunk-size BYTES]
 swiftfs inspect <image>
-swiftfs mount   <image> <target>
+swiftfs mount   <image> <target> [options]
 swiftfs unmount <target>
 swiftfs verify  <image>
 swiftfs bench   [workload] [--image IMAGE] [--data-dir DIR] [--iterations N]
 ```
 
-All subcommands are implemented. `bench` reports real measurements; see
+All subcommands are implemented. `mount` options:
+
+```
+--allow-other                 expose the mount to other users
+--auto-unmount                unmount when the mounting process exits
+--threads N                   FUSE worker threads (default 4)
+--http-base-url URL           fetch chunks over HTTP instead of locally
+--disk-cache-dir DIR          enable a persistent content-addressed disk cache
+--disk-cache-bytes N          disk cache capacity (default 1 GiB)
+--ram-cache-bytes N           RAM cache capacity (default 256 MiB)
+--concurrent-fetches N        max outstanding backend fetches (default 32)
+--storage-timeout-ms N        per-request storage timeout (default 15000)
+--no-read-ahead               disable sequential read-ahead
+--metrics-listen HOST:PORT    serve Prometheus metrics at /metrics
+--config FILE                 load settings from a YAML file (flags override)
+```
+
+`bench` reports real measurements; see
 [`docs/benchmarking.md`](docs/benchmarking.md).
 
 ### End-to-end example (Phase 2 + 3)
