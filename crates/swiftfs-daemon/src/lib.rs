@@ -7,10 +7,12 @@
 // uses `#![forbid(unsafe_code)]`. See docs/design-decisions.md (D7).
 #![deny(unsafe_code)]
 
+pub mod benchmark;
 pub mod fs;
 pub mod index;
 pub mod mount;
 
+pub use benchmark::{run_benchmark, run_full_suite, BenchConfig, BenchmarkResult};
 pub use fs::Swiftfs;
 pub use index::{ChunkRead, ManifestIndex};
 pub use mount::{mount_image, MountConfig, MountError};
