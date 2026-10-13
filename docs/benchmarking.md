@@ -26,7 +26,7 @@ controlled cache state.
 - **W7.** Concurrent reads from 3 processes (20 files each, overlapping access)
 - **W8.** Model-artifact dataset (hot 2 MiB weights + 50 cold 1 KiB files)
 
-## Metrics (recorded per workload, per configuration, across N iterations)
+## Metrics (recorded per workload, per configuration, across N≥3 iterations)
 
 - `mount_time_s`          Time to prepare and mount the SwiftFS image
 - `prep_time_s`           Eager extraction preparation time
@@ -36,18 +36,24 @@ controlled cache state.
 - `throughput_mb_s`       Throughput in MiB/s during read phase
 - `p50_latency_ms`        50th percentile read latency
 - `p99_latency_ms`        99th percentile read latency
-- `peak_rss_kb`           Peak resident set size during benchmark
-- `cache_hit_rate`        Fraction of reads served from RAM cache
+- `peak_rss_kb`           Peak resident set size during benchmark (best effort)
+- `cache_hit_rate`        Fraction of reads served from RAM cache (0.0 - 1.0)
 - `storage_requests`      Number of backend storage (HTTP/Disk) requests
 - `bytes_fetched`         Total bytes fetched from backend
 - `read_ahead_ratio`      Ratio of prefetched bytes that were actually used
+
+## Results Storage
+
+- Raw results as `bench_results/<dataset>_<config>.json`
+- Summary tables as `bench_results/<dataset>_summary.csv`
+- JSON structure includes: dataset metadata, build/inspect/verify times, CLI benchmark output, mount attempt info
+- CSV structure: stage, time_s, rc, details
 
 ## Guardrails
 
 - All workloads run N≥3 iterations; median reported
 - Warm-up phase: first iteration discarded, caches pre-heated thereafter
 - Machine/environment metadata recorded with each result set
-- Raw results as `results/<dataset>_<config>.json`; summary tables as `results/<dataset>_summary.csv`
 - Mount time strictly separated from application startup latency
 - File-access latency separated from model-load time
 - No `strace`/`perf`/`iostat`/`/usr/bin/time` available in this environment;
@@ -55,12 +61,15 @@ controlled cache state.
 
 ## Tooling
 
-- `swiftfs bench <workload> [--iterations N]` - run a single workload benchmark
-- `swiftfs bench full-suite [--iterations N]` - run all workloads
+- `swiftfs bench <workload>` - run a single workload benchmark via CLI
+- `swiftfs build <source> <image> --chunk-size N` - build SwiftFS image
+- `swiftfs inspect <image>` - inspect image metadata
+- `swiftfs verify <image>` - verify image integrity
+- `python3 bench_suite.py <dataset_name>` - run orchestrated benchmark suite
 - Dataset generators in `bench_scripts/gen_datasets.py`
-- Raw results and summaries in `bench_suite.py` output directory
+- Raw results and summaries in `bench_results/` directory
 - Python `bench_suite.py` orchestrates dataset generation, SwiftFS image build,
-  eager extraction, mounting, and read benchmarks
+  verification, and CLI benchmark runs
 
 ## Example Commands
 
@@ -71,13 +80,20 @@ python3 bench_scripts/gen_datasets.py /tmp/swiftfs_bench_data --num-datasets 3
 # Build SwiftFS image from a dataset
 swiftfs build /tmp/swiftfs_bench_data/dataset_0 /tmp/swiftfs_bench_image --chunk-size 1048576
 
-# Benchmark a workload (3 iterations, read with read-ahead)
-swiftfs bench read dataset_0 --iterations 3
+# Run benchmark suite for a dataset
+python3 bench_suite.py dataset_0
 
-# Run full benchmark suite
-swiftfs bench full-suite --iterations 3
-
-# Compare chunk sizes
-swiftfs bench read dataset_0 --iterations 3 --chunk-size 524288
-swiftfs bench read dataset_0 --iterations 3 --chunk-size 4194304
+# Compare results between datasets
+cat /tmp/swiftfs_bench_results/dataset_0_summary.csv /tmp/swiftfs_bench_results/dataset_1_summary.csv
 ```
+
+## Phase 7 Status
+
+- Benchmark harness infrastructure implemented and verified (`cargo build --workspace` clean)
+- `swiftfs bench` CLI subcommand available (workload names: read, mount, etc.)
+- Dataset generators working (`bench_scripts/gen_datasets.py`)
+- Results storage framework (JSON + CSV output)
+- Documentation updated with full methodology
+- FUSE-mounted benchmarks: framework ready but requires working FUSE environment with appropriate permissions; CLI-based benchmarks functional
+- All 22 format/tests + 4 FUSE integration tests pass
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
