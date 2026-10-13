@@ -1604,6 +1604,7 @@ dependencies = [
  "clap",
  "swiftfs-cache",
  "swiftfs-core",
+ "swiftfs-daemon",
  "swiftfs-format",
  "swiftfs-storage",
  "tokio",

@@ -11,8 +11,10 @@ pub mod benchmark;
 pub mod fs;
 pub mod index;
 pub mod mount;
+pub mod read_ahead;
 
 pub use benchmark::{run_benchmark, run_full_suite, BenchConfig, BenchmarkResult};
 pub use fs::Swiftfs;
 pub use index::{ChunkRead, ManifestIndex};
+pub use mount::mount_image_background;
 pub use mount::{mount_image, MountConfig, MountError};

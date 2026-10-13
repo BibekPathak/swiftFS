@@ -27,14 +27,15 @@ use fuser::{
     KernelConfig, LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
-use swiftfs_format::{Node, NodeKind};
-use swiftfs_core::{Result as SfsResult, SwiftfsError, DEFAULT_CHUNK_SIZE};
-use swiftfs_storage::ChunkLocation;
 use swiftfs_cache::ChunkFetcher;
+use swiftfs_core::{Result as SfsResult, SwiftfsError, DEFAULT_CHUNK_SIZE};
+use swiftfs_format::{Node, NodeKind};
+use swiftfs_storage::ChunkLocation;
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
 use crate::index::ManifestIndex;
+use crate::read_ahead::{ReadAhead, READ_AHEAD_CHUNKS};
 
 /// Basename of an absolute path.
 fn basename(path: &str) -> &str {
@@ -43,7 +44,6 @@ fn basename(path: &str) -> &str {
         None => path,
     }
 }
-
 
 /// Attribute / entry cache TTL. The image is immutable, so entries may be
 /// cached aggressively.
@@ -56,6 +56,8 @@ pub struct Swiftfs {
     rt: Handle,
     uid: u32,
     gid: u32,
+    /// Sequential-access tracker; `None` when read-ahead is disabled.
+    read_ahead: Option<ReadAhead>,
 }
 
 impl Swiftfs {
@@ -67,12 +69,25 @@ impl Swiftfs {
         mount_uid: u32,
         mount_gid: u32,
     ) -> Self {
+        Self::with_read_ahead(index, fetcher, rt, mount_uid, mount_gid, true)
+    }
+
+    /// Construct a filesystem, choosing whether to enable read-ahead.
+    pub fn with_read_ahead(
+        index: Arc<ManifestIndex>,
+        fetcher: Arc<ChunkFetcher>,
+        rt: Handle,
+        mount_uid: u32,
+        mount_gid: u32,
+        read_ahead: bool,
+    ) -> Self {
         Self {
             index,
             fetcher,
             rt,
             uid: mount_uid,
             gid: mount_gid,
+            read_ahead: read_ahead.then(ReadAhead::new),
         }
     }
 
@@ -130,7 +145,7 @@ impl Swiftfs {
                         offset: piece.chunk.object_offset,
                         length: piece.chunk.length,
                     };
-let arc_data = self.fetcher.get(&piece.chunk.object, &location).await?;
+                    let arc_data = self.fetcher.get(&piece.chunk.object, &location).await?;
                     // `?` inside the async block is fine.
                     // ChunkBytes = Arc<Vec<u8>; clone to get owned Vec<u8>.
                     let data = arc_data.clone();
@@ -149,6 +164,54 @@ let arc_data = self.fetcher.get(&piece.chunk.object, &location).await?;
         })?;
         Ok(data)
     }
+
+    /// After serving `[offset, offset+size)`, schedule background prefetch of
+    /// the following chunks when the access looks sequential.
+    ///
+    /// Prefetches go through the same `ChunkFetcher` as foreground reads and run
+    /// on the Tokio runtime, so they are coalesced and never block the FUSE
+    /// worker thread. This is best-effort: failures are logged and ignored, and
+    /// nothing is sent back to the kernel.
+    fn maybe_prefetch(&self, ino: u64, node: &Node, offset: u64, size: u32) {
+        let Some(ref tracker) = self.read_ahead else {
+            return;
+        };
+        if node.kind != NodeKind::File {
+            return;
+        }
+        if !tracker.observe(ino, offset, size) {
+            return;
+        }
+
+        let end = offset.saturating_add(u64::from(size));
+        let next = self.index.chunks_after(node, end, READ_AHEAD_CHUNKS);
+        if next.is_empty() {
+            return;
+        }
+        let locations: Vec<(String, ChunkLocation)> = next
+            .into_iter()
+            .map(|c| {
+                (
+                    c.hash.clone(),
+                    ChunkLocation {
+                        object: c.object.clone(),
+                        offset: c.object_offset,
+                        length: c.length,
+                    },
+                )
+            })
+            .collect();
+
+        let fetcher = Arc::clone(&self.fetcher);
+        self.rt.spawn(async move {
+            for (hash, location) in locations {
+                // Best-effort: a prefetch failure must not surface anywhere.
+                if let Err(e) = fetcher.get(&hash, &location).await {
+                    debug!(hash, error = %e, "read-ahead prefetch failed");
+                }
+            }
+        });
+    }
 }
 
 /// Map a SwiftFS error to an errno for the FUSE reply.
@@ -156,9 +219,9 @@ fn errno_for(err: &SwiftfsError) -> Errno {
     match err {
         SwiftfsError::ChunkNotFound(_) | SwiftfsError::PathRejected(_) => Errno::ENOENT,
         SwiftfsError::UnsupportedFileType(_) => Errno::EINVAL,
-        SwiftfsError::IntegrityFailure(_) | SwiftfsError::Storage(_) | SwiftfsError::InvalidImage(_) => {
-            Errno::EIO
-        }
+        SwiftfsError::IntegrityFailure(_)
+        | SwiftfsError::Storage(_)
+        | SwiftfsError::InvalidImage(_) => Errno::EIO,
         SwiftfsError::Io(e) => Errno::from(e.kind()),
     }
 }
@@ -242,7 +305,12 @@ impl Filesystem for Swiftfs {
         }
 
         match self.read_range(node, offset, size) {
-            Ok(data) => reply.data(&data),
+            Ok(data) => {
+                // Schedule read-ahead before replying; it is fire-and-forget and
+                // does not delay the foreground read.
+                self.maybe_prefetch(ino.0, node, offset, size);
+                reply.data(&data);
+            }
             Err(e) => {
                 warn!(inode = ino.0, offset, size, error = %e, "read failed");
                 reply.error(errno_for(&e));

@@ -16,6 +16,7 @@ swiftfs-core.workspace = true
 swiftfs-format.workspace = true
 swiftfs-storage.workspace = true
 swiftfs-cache.workspace = true
+swiftfs-daemon = { path = "../swiftfs-daemon" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

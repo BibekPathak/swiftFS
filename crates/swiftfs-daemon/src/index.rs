@@ -141,6 +141,21 @@ impl ManifestIndex {
         }
         out
     }
+
+    /// The next `count` chunks of `node` that begin at or after `offset`.
+    ///
+    /// Used to schedule read-ahead: it returns chunks strictly beyond the byte
+    /// position already served, in file order, capped at `count`.
+    pub fn chunks_after<'a>(&self, node: &'a Node, offset: u64, count: usize) -> Vec<&'a Chunk> {
+        if node.kind != NodeKind::File || count == 0 {
+            return Vec::new();
+        }
+        node.chunks
+            .iter()
+            .filter(|c| c.offset >= offset)
+            .take(count)
+            .collect()
+    }
 }
 
 /// A chunk overlapping a requested read, with the sub-range to serve.

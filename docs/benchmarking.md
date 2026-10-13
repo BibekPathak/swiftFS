@@ -61,39 +61,69 @@ controlled cache state.
 
 ## Tooling
 
-- `swiftfs bench <workload>` - run a single workload benchmark via CLI
-- `swiftfs build <source> <image> --chunk-size N` - build SwiftFS image
-- `swiftfs inspect <image>` - inspect image metadata
-- `swiftfs verify <image>` - verify image integrity
-- `python3 bench_suite.py <dataset_name>` - run orchestrated benchmark suite
-- Dataset generators in `bench_scripts/gen_datasets.py`
-- Raw results and summaries in `bench_results/` directory
-- Python `bench_suite.py` orchestrates dataset generation, SwiftFS image build,
-  verification, and CLI benchmark runs
+- `swiftfs bench <workload>` — run one workload with real measurements
+- `swiftfs bench full` — run every workload and print a summary table
+- `swiftfs-bench` — standalone harness over the same measurements
+- `swiftfs build <source> <image> --chunk-size N` — build a SwiftFS image
+- `swiftfs inspect <image>` / `swiftfs verify <image>
+- `python3 bench_suite.py <source_dir>` — build an image, run the suite, attempt
+  a real FUSE mount + full-tree read, and write JSON/CSV results
+- `bench_scripts/gen_datasets.py` — generate synthetic datasets
 
 ## Example Commands
 
 ```bash
-# Generate synthetic datasets
-python3 bench_scripts/gen_datasets.py /tmp/swiftfs_bench_data --num-datasets 3
+# Build an image and run every workload against it.
+swiftfs build ./myroot ./myimage --chunk-size 1048576
+swiftfs bench full --image ./myimage --data-dir ./myroot --iterations 5
 
-# Build SwiftFS image from a dataset
-swiftfs build /tmp/swiftfs_bench_data/dataset_0 /tmp/swiftfs_bench_image --chunk-size 1048576
+# One workload.
+swiftfs bench read --image ./myimage --iterations 5
 
-# Run benchmark suite for a dataset
-python3 bench_suite.py dataset_0
+# Compare chunk sizes for build/read cost.
+swiftfs bench read --image ./myimage --iterations 5 --no-read-ahead
+swiftfs bench read --image ./myimage --iterations 5
 
-# Compare results between datasets
-cat /tmp/swiftfs_bench_results/dataset_0_summary.csv /tmp/swiftfs_bench_results/dataset_1_summary.csv
+# Full orchestration with a real FUSE mount test and JSON/CSV output.
+python3 bench_suite.py ./myroot --iterations 5
 ```
 
-## Phase 7 Status
+## How measurements are produced
 
-- Benchmark harness infrastructure implemented and verified (`cargo build --workspace` clean)
-- `swiftfs bench` CLI subcommand available (workload names: read, mount, etc.)
-- Dataset generators working (`bench_scripts/gen_datasets.py`)
-- Results storage framework (JSON + CSV output)
-- Documentation updated with full methodology
-- FUSE-mounted benchmarks: framework ready but requires working FUSE environment with appropriate permissions; CLI-based benchmarks functional
-- All 22 format/tests + 4 FUSE integration tests pass
-- `cargo clippy --workspace --all-targets -- -D warnings` clean
+`swiftfs bench` performs genuine work for every number it prints:
+
+- `build`, `inspect`, `verify`: wall-clock time of the corresponding image
+  operation, over `--iterations` runs (median via p50).
+- `mount`: time to load + validate the manifest and build the immutable
+  `ManifestIndex` — the work done before the FUSE session starts. It is **not**
+  reported as application startup time.
+- `read` (cold) / `warm_read` (warm) / `compare` / `read-ahead` / `io`: latency
+  samples from real chunk reads through the same `ChunkFetcher` (RAM cache,
+  disk cache, single-flight coalescing) used by the FUSE read path. Cold reads
+  clear the RAM cache before each measured pass; warm reads reuse it. Cache-hit
+  rate and backend-fetch counts come from the fetcher's own metrics, measured
+  as deltas around the measured phase.
+- p50/p99 use the nearest-rank method over the collected samples.
+- Peak RSS is read from `/proc/self/status` (`VmHWM`) on Linux.
+
+FUSE mounting is deliberately not attempted from inside the Rust harness, since
+`/dev/fuse` availability varies by host. The Python `bench_suite.py` drives a
+real mount when `/dev/fuse` and `fusermount` are present and reports a clear
+message when they are not.
+
+## Read-ahead
+
+Sequential read-ahead is implemented in the daemon (`read_ahead.rs`, wired into
+the FUSE `read` callback): a read of at least `READ_AHEAD_MIN_READ` bytes that
+continues within `READ_AHEAD_WINDOW` bytes of the previous read on the same
+inode triggers background prefetch of up to `READ_AHEAD_CHUNKS` following
+chunks. Prefetches use the same coalescing fetcher and run on the daemon's
+Tokio runtime; they never block the FUSE worker thread. `--no-read-ahead`
+disables the heuristic.
+
+## Status
+
+No performance numbers are asserted in this document. Run `swiftfs bench full`
+or `python3 bench_suite.py` to produce results for your machine and dataset;
+they are written under the work directory (JSON + CSV). This keeps every figure
+traceable to a command, a dataset, a cache state, and a machine.

@@ -76,7 +76,8 @@ directory listings, and chunk ranges.
 ### swiftfs-bench
 
 Reproducible synthetic and model-shard-style workloads comparing eager
-extraction with SwiftFS under cold/warm caches and varied tuning. Phase 6.
+extraction with SwiftFS under cold/warm caches and varied tuning. See
+[`benchmarking.md`](benchmarking.md).
 
 ## Data flow (target end state)
 
@@ -89,7 +90,7 @@ read:    FUSE read(ino, offset, size)
            -> cache lookup (RAM, then disk)
            -> miss: single-flight fetch -> storage backend
            -> verify BLAKE3 -> publish into cache
-           -> serve bytes; optionally schedule read-ahead
+           -> serve bytes; schedule read-ahead for sequential access
 ```
 
 ## Threading overview

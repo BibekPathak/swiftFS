@@ -187,3 +187,48 @@ the unmount to block. Tests close their handles before unmounting, and this is
 documented as expected FUSE behavior rather than worked around. `swiftfs
 unmount` shells out to `fusermount3` (falling back to `umount`), which handles
 the normal case.
+
+## D17. Sequential read-ahead on the read path
+
+The FUSE `read` callback, after serving the requested bytes, consults a small
+per-inode tracker (`read_ahead.rs`). A read of at least `READ_AHEAD_MIN_READ`
+bytes that continues within `READ_AHEAD_WINDOW` bytes of the previous read on
+the same inode is treated as sequential and triggers a background prefetch of up
+to `READ_AHEAD_CHUNKS` following chunks.
+
+Rationale and properties:
+
+- The image is immutable, so prefetching can only change which chunks are
+  resident, never what is returned. The read-ahead result is therefore
+  correctness-neutral; `read_ahead_returns_correct_bytes_on_and_off` asserts
+  this through a real mount.
+- Prefetches use the same `ChunkFetcher` as foreground reads, so they are
+  coalesced: a prefetch and a real read for the same chunk share one backend
+  fetch. This is why enabling read-ahead does not increase backend request
+  counts, only cache-hit rates.
+- Prefetch tasks run on the daemon's Tokio runtime and never block the FUSE
+  worker thread that issued the read.
+- The tracker is bounded (`MAX_TRACKED_INODES`) so adversarial access cannot grow
+  it without limit; exceeding the bound clears the map, costing at most one cold
+  read.
+- `--no-read-ahead` (mount config `read_ahead`) disables the heuristic entirely.
+
+## D18. Benchmarks measure real work and are reported as such
+
+`run_benchmark` performs genuine operations: it times image `build`/`inspect`/
+`verify`, times manifest load + index construction for `mount`, and collects
+real chunk-read latency samples through the same fetcher the FUSE path uses.
+Cold and warm cache states are controlled explicitly; cache-hit rate and backend
+fetch counts are taken as deltas around the measured phase from the fetcher's
+own metrics. p50/p99 use nearest-rank. Peak RSS comes from `/proc/self/status`.
+
+The Rust harness deliberately does not attempt a FUSE mount (host-dependent), so
+read latency is measured at the fetcher layer, which dominates a SwiftFS read.
+`bench_suite.py` drives a real mount when `/dev/fuse` is available and reports a
+clear message otherwise.
+
+## D19. `swiftfs-bench` delegates to the daemon benchmark module
+
+Rather than duplicate measurement logic, `swiftfs-bench` depends on
+`swiftfs-daemon` and calls the same `run_benchmark`/`run_full_suite`. The main
+`swiftfs bench` subcommand and the standalone binary therefore cannot drift.

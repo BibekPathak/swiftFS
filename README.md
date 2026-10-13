@@ -8,12 +8,13 @@ time to first process execution and time to first inference for large container
 images and ML model artifacts, compared with eagerly downloading and extracting
 everything up front.
 
-> **Status: Phase 3 (read-only FUSE filesystem) complete.** `swiftfs build`,
-> `inspect`, `verify`, `mount`, and `unmount` work. A mounted image lists
-> directories without fetching file data and reads bytes on demand from the
-> local backend, verified against BLAKE3 chunk hashes. The HTTP backend, caching,
-> read-ahead, and benchmarks are implemented in later phases. `workload
-> prefetching`, the HTTP backend, and `bench` are **not** yet functional.
+> **Status: feature-complete for the documented scope.** `swiftfs build`,
+> `inspect`, `verify`, `mount`, and `unmount` work, as does `bench`. A mounted
+> image lists directories without fetching file data and reads bytes on demand,
+> verified against BLAKE3 chunk hashes. The HTTP byte-range backend, bounded
+> RAM/disk caches, single-flight request coalescing, metrics, and sequential
+> read-ahead are implemented. `swiftfs bench` reports **real** measurements
+> (it does not fabricate numbers); see [`docs/benchmarking.md`](docs/benchmarking.md).
 
 ## Documentation
 
@@ -22,7 +23,7 @@ everything up front.
 | [`docs/architecture.md`](docs/architecture.md) | Component layout and data flow |
 | [`docs/design-decisions.md`](docs/design-decisions.md) | Decisions, trade-offs, threading model |
 | [`docs/image-format.md`](docs/image-format.md) | Manifest schema and chunking |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | Benchmark methodology (Phase 6) |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | Benchmark methodology and results |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common setup issues |
 
 ## Environment requirements
@@ -55,11 +56,11 @@ swiftfs inspect <image>
 swiftfs mount   <image> <target>
 swiftfs unmount <target>
 swiftfs verify  <image>
-swiftfs bench   [workload]
+swiftfs bench   [workload] [--image IMAGE] [--data-dir DIR] [--iterations N]
 ```
 
-Subcommands `build`, `inspect`, `verify`, `mount`, and `unmount` are implemented.
-`bench` reports that it is implemented in a later phase.
+All subcommands are implemented. `bench` reports real measurements; see
+[`docs/benchmarking.md`](docs/benchmarking.md).
 
 ### End-to-end example (Phase 2 + 3)
 

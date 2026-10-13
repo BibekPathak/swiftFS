@@ -326,4 +326,56 @@ mod fuse {
             assert!(fs::read_dir(mnt.path()).unwrap().next().is_none());
         }
     }
+
+    fn mount_with_read_ahead(
+        image: &Path,
+        target: &Path,
+        read_ahead: bool,
+    ) -> Option<swiftfs_daemon::mount::MountedHandle> {
+        let mut config = MountConfig::new(image, target);
+        config.n_threads = 2;
+        config.read_ahead = read_ahead;
+        match swiftfs_daemon::mount::mount_image_background(&config) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("SKIP: cannot mount FUSE here: {e}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires /dev/fuse and mount permission"]
+    fn read_ahead_returns_correct_bytes_on_and_off() {
+        // Read-ahead must never change the bytes a sequential read returns.
+        let (src, _out, image) = build_sample();
+        let src_big = fs::read(src.path().join("big.bin")).unwrap();
+
+        for enabled in [true, false] {
+            let mnt = TempDir::new().unwrap();
+            let Some(handle) = mount_with_read_ahead(&image, mnt.path(), enabled) else {
+                return;
+            };
+
+            // Read sequentially in 256 KiB windows to exercise the heuristic.
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = fs::File::open(mnt.path().join("big.bin")).unwrap();
+            let mut assembled = Vec::new();
+            let mut buf = vec![0u8; 256 * 1024];
+            f.seek(SeekFrom::Start(0)).unwrap();
+            loop {
+                let n = f.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                assembled.extend_from_slice(&buf[..n]);
+            }
+            drop(f);
+            assert_eq!(
+                assembled, src_big,
+                "read-ahead={enabled} changed file contents"
+            );
+            handle.unmount().unwrap();
+        }
+    }
 }

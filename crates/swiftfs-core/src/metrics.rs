@@ -126,12 +126,7 @@ impl Histogram {
 
 /// Format a histogram in Prometheus text exposition format, with cumulative
 /// buckets as Prometheus requires.
-pub fn write_histogram(
-    out: &mut String,
-    name: &str,
-    help: &str,
-    hist: &Histogram,
-) {
+pub fn write_histogram(out: &mut String, name: &str, help: &str, hist: &Histogram) {
     out.push_str(&format!("# HELP {name} {help}\n"));
     out.push_str(&format!("# TYPE {name} histogram\n"));
     let mut cumulative = 0u64;
@@ -147,7 +142,10 @@ pub fn write_histogram(
             }
         }
     }
-    out.push_str(&format!("{name}_sum {}\n", hist.sum_us() as f64 / 1_000_000.0));
+    out.push_str(&format!(
+        "{name}_sum {}\n",
+        hist.sum_us() as f64 / 1_000_000.0
+    ));
     out.push_str(&format!("{name}_count {}\n", hist.count()));
 }
 

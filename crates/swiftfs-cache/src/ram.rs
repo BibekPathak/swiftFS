@@ -78,7 +78,11 @@ impl RamCache {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = inner.next_seq;
         let result = if inner.entries.contains_key(key) {
-            let (data, old_seq) = inner.entries.get(key).map(|(d, s)| (Arc::clone(d), *s)).unwrap();
+            let (data, old_seq) = inner
+                .entries
+                .get(key)
+                .map(|(d, s)| (Arc::clone(d), *s))
+                .unwrap();
             inner.order.remove(&old_seq);
             if let Some(entry) = inner.entries.get_mut(key) {
                 entry.1 = seq;

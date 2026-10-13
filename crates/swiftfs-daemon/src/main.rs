@@ -1,7 +1,6 @@
 //! `swiftfs` command-line entry point.
 //!
-//! Phase 3 implements `build`, `inspect`, `verify`, `mount`, and `unmount`.
-//! `bench` arrives in Phase 6.
+//! Implements `build`, `inspect`, `verify`, `mount`, `unmount`, and `bench`.
 
 use clap::{Parser, Subcommand};
 use swiftfs_format::{build_image, inspect_image, verify_image, BuildOptions};
@@ -18,7 +17,8 @@ use swiftfs_format::{build_image, inspect_image, verify_image, BuildOptions};
         swiftfs build ./myroot ./myimage --chunk-size 262144\n  \
         swiftfs inspect ./myimage\n  \
         swiftfs verify ./myimage\n  \
-        swiftfs mount ./myimage /mnt/swiftfs"
+        swiftfs mount ./myimage /mnt/swiftfs\n  \
+        swiftfs bench full --image ./myimage --data-dir ./myroot"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -65,11 +65,30 @@ enum Command {
         /// Path to a SwiftFS image.
         image: std::path::PathBuf,
     },
-    /// Run or invoke supported benchmark workloads.
+    /// Run benchmark workloads with real measurements.
     Bench {
-        /// Benchmark workload name.
-        #[arg(default_value = "help")]
+        /// Workload: build, inspect, verify, mount, read, warm_read, compare,
+        /// read-ahead, io, or "full" for the whole suite.
+        #[arg(default_value = "full")]
         workload: String,
+        /// Path to a pre-built image (required for all workloads except build).
+        #[arg(long)]
+        image: Option<std::path::PathBuf>,
+        /// Path to a source directory (required for the build workload).
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+        /// Measured iterations per workload.
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+        /// Chunk size in bytes (build workload).
+        #[arg(long, default_value_t = swiftfs_core::DEFAULT_CHUNK_SIZE)]
+        chunk_size: u32,
+        /// RAM cache capacity in bytes.
+        #[arg(long, default_value_t = 256 * 1024 * 1024)]
+        ram_cache_bytes: u64,
+        /// Disable read-ahead.
+        #[arg(long)]
+        no_read_ahead: bool,
     },
 }
 
@@ -98,9 +117,23 @@ fn main() -> anyhow::Result<()> {
             threads,
         } => command_mount(image, target, allow_other, threads),
         Command::Unmount { target } => command_unmount(target),
-        Command::Bench { workload } => {
-            anyhow::bail!("`bench {workload}` is implemented in Phase 6")
-        }
+        Command::Bench {
+            workload,
+            image,
+            data_dir,
+            iterations,
+            chunk_size,
+            ram_cache_bytes,
+            no_read_ahead,
+        } => command_bench(
+            workload,
+            image,
+            data_dir,
+            iterations,
+            chunk_size,
+            ram_cache_bytes,
+            !no_read_ahead,
+        ),
     }
 }
 
@@ -190,4 +223,49 @@ fn command_unmount(target: std::path::PathBuf) -> anyhow::Result<()> {
         Ok(status) => anyhow::bail!("umount {target_str} failed with {status}"),
         Err(e) => anyhow::bail!("no unmount tool available (fusermount3/umount): {e}"),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_bench(
+    workload: String,
+    image: Option<std::path::PathBuf>,
+    data_dir: Option<std::path::PathBuf>,
+    iterations: usize,
+    chunk_size: u32,
+    ram_cache_bytes: u64,
+    read_ahead: bool,
+) -> anyhow::Result<()> {
+    let config = swiftfs_daemon::BenchConfig {
+        iterations,
+        read_ahead,
+        ram_cache_bytes,
+        chunk_size,
+        image,
+        data_dir,
+    };
+
+    if workload == "full" || workload == "help" {
+        return swiftfs_daemon::run_full_suite(&config);
+    }
+
+    let result = swiftfs_daemon::run_benchmark(&config, &workload)?;
+    println!("workload:        {}", result.name);
+    println!("p50 latency:     {:.3} ms", result.p50_ms);
+    println!("p99 latency:     {:.3} ms", result.p99_ms);
+    println!("ttfa:            {:.3} ms", result.ttfa_ms);
+    println!(
+        "prep/total:      {} ms / {} ms",
+        result.mount_ms, result.total_ms
+    );
+    println!("cache hit rate:  {:.1}%", result.cache_hit_rate * 100.0);
+    println!("storage fetches: {}", result.storage_requests);
+    println!("bytes fetched:   {}", result.bytes_fetched);
+    println!("peak rss:        {} KiB", result.peak_rss / 1024);
+    if !result.raw.is_empty() {
+        println!("raw:");
+        for (k, v) in &result.raw {
+            println!("  {k}: {v}");
+        }
+    }
+    Ok(())
 }

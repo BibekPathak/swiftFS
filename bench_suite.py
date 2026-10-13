@@ -1,233 +1,278 @@
 #!/usr/bin/env python3
-"""Phase 7: Run SwiftFS benchmarks and generate performance report.
+"""Orchestrate SwiftFS benchmarks and store results as CSV/JSON.
 
-Orchestrates benchmark runs using the SwiftFS CLI. Generates datasets,
-builds SwiftFS images, runs CLI benchmarks, and stores results as CSV/JSON.
+This script drives the real `swiftfs bench` CLI, which performs genuine
+measurements (image build/inspect/verify timings and chunk-read latency through
+the cache/fetcher stack). It does **not** invent numbers.
 
-Note: Actual FUSE-mounted benchmarks require a working FUSE environment
-with appropriate permissions. This script focuses on the orchestration
-framework and collects metrics available via the CLI.
+It additionally exercises a real FUSE mount when `/dev/fuse` is available, and
+reports a clear error (not an internal exception) when it is not.
+
+Usage:
+    python3 bench_suite.py <source_dir> [--iterations N] [--no-mount]
+
+The source directory is built into a SwiftFS image under --work-dir, then each
+workload is run and its output captured. Results are written to
+<work-dir>/results/ as JSON (per workload) and a CSV summary.
 """
 
-import os
-import sys
-import json
-import subprocess
+import argparse
 import csv
-import time
+import json
+import os
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 
-# Configuration
-SWIFTFS_BIN = "/home/BibekP/swiftFS/target/debug/swiftfs"
-SWIFTFS_DATA_DIR = "/tmp/swiftfs_bench_data"
-RESULTS_DIR = "/tmp/swiftfs_bench_results"
-CHUNK_SIZE = 1024 * 1024  # 1 MiB
-
-# Ensure directories exist
-os.makedirs(SWIFTFS_DATA_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR, exist_ok=True)
+DEFAULT_WORK_DIR = "/tmp/swiftfs_bench"
 
 
-def run_cmd(cmd, cwd=None, timeout=60):
-    """Run a command and return (returncode, stdout, stderr)."""
+def run_cmd(cmd, timeout=300, cwd=None):
+    """Run a command, returning (returncode, stdout, stderr)."""
     try:
-        result = subprocess.run(
+        p = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
         )
-        return result.returncode, result.stdout, result.stderr
+        return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return -1, "", "TIMEOUT"
+        return -1, "", f"TIMEOUT after {timeout}s"
 
 
-def dataset_path(name):
-    """Get path for a dataset."""
-    return os.path.join(SWIFTFS_DATA_DIR, name)
-
-
-def swiftfs_build_image(source_dir, image_dir, chunk_size=CHUNK_SIZE):
-    """Build a SwiftFS image from a source directory."""
-    # Clean output directory if it exists
-    if os.path.exists(image_dir):
-        shutil.rmtree(image_dir, ignore_errors=True)
-    t0 = time.time()
-    rc, out, err = run_cmd([
-        SWIFTFS_BIN, "build", source_dir, image_dir,
-        "--chunk-size", str(chunk_size)
-    ])
-    t1 = time.time()
-    return {
-        "prep_time_s": t1 - t0,
-        "rc": rc,
-        "build_out": out,
-        "build_err": err,
-    }
-
-
-def swiftfs_inspect(image_dir):
-    """Inspect a SwiftFS image."""
-    t0 = time.time()
-    rc, out, err = run_cmd([SWIFTFS_BIN, "inspect", image_dir])
-    t1 = time.time()
-    return {
-        "inspect_time_s": t1 - t0,
-        "rc": rc,
-        "inspect_out": out,
-        "inspect_err": err,
-    }
-
-
-def swiftfs_verify(image_dir):
-    """Verify a SwiftFS image."""
-    t0 = time.time()
-    rc, out, err = run_cmd([SWIFTFS_BIN, "verify", image_dir])
-    t1 = time.time()
-    return {
-        "verify_time_s": t1 - t0,
-        "rc": rc,
-        "verify_out": out,
-        "verify_err": err,
-    }
-
-
-def count_files(directory):
-    """Count the number of files in a directory tree."""
-    return len([f for f in Path(directory).rglob('*') if f.is_file()])
+def swiftfs_bin():
+    for cand in ("swiftfs",):
+        p = shutil.which(cand)
+        if p:
+            return p
+    # Fall back to a locally built target if present.
+    for profile in ("debug", "release"):
+        p = Path(__file__).resolve().parent / "target" / profile / "swiftfs"
+        if p.exists():
+            return str(p)
+    sys.exit("could not find the `swiftfs` binary; build it or add it to PATH")
 
 
 def dataset_size_mb(directory):
-    """Get total size of a dataset in MB."""
-    total = sum(f.stat().st_size for f in Path(directory).rglob('*') if f.is_file())
+    total = sum(f.stat().st_size for f in Path(directory).rglob("*") if f.is_file())
     return total / (1024 * 1024)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 bench_suite.py <dataset_name>")
-        print(f"Available datasets in {SWIFTFS_DATA_DIR}:")
-        if os.path.exists(SWIFTFS_DATA_DIR):
-            for d in os.listdir(SWIFTFS_DATA_DIR):
-                if os.path.isdir(os.path.join(SWIFTFS_DATA_DIR, d)):
-                    print(f"  {d}")
-        sys.exit(1)
-    
-    dataset_name = sys.argv[1]
-    ds_dir = dataset_path(dataset_name)
-    
-    if not os.path.isdir(ds_dir):
-        print(f"Dataset {dataset_name} not found. Generating...")
-        import random
-        os.makedirs(ds_dir, exist_ok=True)
-        # Many small files
-        for i in range(20):
-            data = os.urandom(random.randint(1, 4096))
-            with open(os.path.join(ds_dir, f"file_{i:05d}.bin"), 'wb') as f:
-                f.write(data)
-        # Large file
-        data = os.urandom(5 * 1024 * 1024)
-        with open(os.path.join(ds_dir, "large.bin"), 'wb') as f:
-            f.write(data)
-        # Shard files
-        for i in range(5):
-            data = os.urandom((i+1) * 256 * 1024)
-            with open(os.path.join(ds_dir, f"shard_{i:03d}.bin"), 'wb') as f:
-                f.write(data)
-        # Hot + cold files
-        with open(os.path.join(ds_dir, "model.weights"), 'wb') as f:
-            f.write(os.urandom(2 * 1024 * 1024))
-        for i in range(10):
-            with open(os.path.join(ds_dir, f"cold_{i:03d}.bin"), 'wb') as f:
-                f.write(os.urandom(random.randint(1, 4096)))
-    
-    print(f"Benchmark suite for dataset: {dataset_name}")
-    print(f"Dataset size: {dataset_size_mb(ds_dir):.2f} MB")
-    
-    results = {}
-    
-    # Step 1: Build SwiftFS image
-    print("\n1. Building SwiftFS image...")
-    build_result = swiftfs_build_image(ds_dir, dataset_path(f"{dataset_name}_image"))
-    results["build"] = build_result
-    print(f"   Build time: {build_result['prep_time_s']:.3f}s, rc={build_result['rc']}")
-    if build_result['rc'] != 0:
-        print(f"   Error: {build_result['build_err'][:200]}")
-    
-    # Step 2: Inspect
-    print("\n2. Inspecting image...")
-    insp = swiftfs_inspect(dataset_path(f"{dataset_name}_image"))
-    results["inspect"] = insp
-    print(f"   Inspect time: {insp['inspect_time_s']:.3f}s, rc={insp['rc']}")
-    if insp['rc'] != 0:
-        print(f"   Error: {insp['inspect_err'][:200]}")
-    
-    # Step 3: Verify
-    print("\n3. Verifying image...")
-    vrfy = swiftfs_verify(dataset_path(f"{dataset_name}_image"))
-    results["verify"] = vrfy
-    print(f"   Verify time: {vrfy['verify_time_s']:.3f}s, rc={vrfy['rc']}")
-    if vrfy['rc'] != 0:
-        print(f"   Error: {vrfy['verify_err'][:200]}")
-    
-    # Step 4: Run bench CLI
-    print("\n4. Running bench CLI...")
-    bench_out = ""
-    bench_err = ""
+def fuse_available():
+    return os.path.exists("/dev/fuse") and (
+        shutil.which("fusermount3") or shutil.which("fusermount")
+    )
+
+
+def parse_bench_output(text):
+    """Parse `key: value` lines and the results table from bench output.
+
+    Strips ANSI escape sequences and drops tracing log lines (which contain a
+    timestamp and level) before parsing.
+    """
+    import re
+
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    rows = []
+    flat = {}
+    for raw in text.splitlines():
+        line = ansi.sub("", raw).rstrip()
+        if not line:
+            continue
+        # Results table: "<workload>  p50=... p99=... ttfa=... total=... backend=... hit=..."
+        if "=" in line and " p50=" in line:
+            first = line.split(None, 1)
+            row = {"workload": first[0]}
+            rest = first[1] if len(first) > 1 else ""
+            for k, v in re.findall(r"(\w+)=\s*([0-9.]+)", rest):
+                row[k] = v
+            rows.append(row)
+            continue
+        # Key/value header lines.
+        if ":" in line and not line.startswith(" "):
+            k, _, v = line.partition(":")
+            flat[k.strip()] = v.strip()
+    return flat, rows
+
+
+def try_mount(sfs, image_dir, mount_point):
+    """Attempt a real FUSE mount + read. Returns a dict describing the result."""
+    info = {"attempted": True, "mounted": False, "reads": []}
+    if not fuse_available():
+        info["attempted"] = False
+        info["reason"] = "/dev/fuse or fusermount not available"
+        return info
+
+    os.makedirs(mount_point, exist_ok=True)
+    # Ensure no stale mount.
+    for tool in ("fusermount3", "fusermount"):
+        if shutil.which(tool):
+            run_cmd([tool, "-u", mount_point], timeout=10)
+            break
+
+    proc = subprocess.Popen(
+        [sfs, "mount", image_dir, mount_point],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # Wait for the mount to appear.
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if os.path.ismount(mount_point):
+            info["mounted"] = True
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+
+    if not info["mounted"]:
+        out, err = ("", "")
+        try:
+            out, err = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        info["reason"] = (err or out or "mount did not appear").strip()[:400]
+        return info
+
+    info["mount_time_s"] = None
+    # Read every file, timing each read.
+    files = sorted(
+        p for p in Path(mount_point).rglob("*") if p.is_file()
+    )
+    for f in files:
+        t0 = time.time()
+        try:
+            with open(f, "rb") as fh:
+                data = fh.read()
+            info["reads"].append(
+                {"path": str(f.relative_to(mount_point)),
+                 "bytes": len(data),
+                 "read_time_s": time.time() - t0}
+            )
+        except OSError as e:
+            info["reads"].append(
+                {"path": str(f.relative_to(mount_point)), "error": str(e)}
+            )
+
+    # Unmount.
+    t0 = time.time()
+    for tool in ("fusermount3", "fusermount"):
+        if shutil.which(tool):
+            rc, _, err = run_cmd([tool, "-u", mount_point], timeout=10)
+            info["unmount_rc"] = rc
+            break
+    info["unmount_time_s"] = time.time() - t0
     try:
-        rc, out, err = run_cmd([SWIFTFS_BIN, "bench", "read", dataset_name])
-        bench_out = out
-        bench_err = err
-    except Exception as e:
-        bench_err = str(e)[:200]
-    results["bench_cli"] = {
-        "rc": rc if 'rc' in dir() else -1,
-        "out": bench_out,
-        "err": bench_err,
-    }
-    print(f"   Bench CLI rc={results['bench_cli']['rc']}")
-    if bench_out:
-        print(f"   Output: {bench_out[:300]}")
-    if bench_err:
-        print(f"   Error: {bench_err[:200]}")
-    
-    # Step 5: Store results
-    dataset_size = dataset_size_mb(ds_dir)
-    result_data = {
-        "dataset": dataset_name,
-        "dataset_size_mb": dataset_size,
-        "chunk_size": CHUNK_SIZE,
-        "results": results,
-    }
-    
-    # Store as JSON
-    result_file = os.path.join(RESULTS_DIR, f"{dataset_name}_results.json")
-    with open(result_file, 'w') as f:
-        json.dump(result_data, f, indent=2)
-    
-    # Store as CSV summary
-    csv_file = os.path.join(RESULTS_DIR, f"{dataset_name}_summary.csv")
-    with open(csv_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["stage", "time_s", "rc", "details"])
-        writer.writerow(["build", build_result["prep_time_s"], build_result["rc"], 
-                        build_result["build_err"][:50] if build_result["build_err"] else ""])
-        writer.writerow(["inspect", insp["inspect_time_s"], insp["rc"], ""])
-        writer.writerow(["verify", vrfy["verify_time_s"], vrfy["rc"], ""])
-        writer.writerow(["bench_cli", results["bench_cli"]["rc"], results["bench_cli"]["rc"], ""])
-    
-    print(f"\nResults stored:")
-    print(f"  JSON: {result_file}")
-    print(f"  CSV:  {csv_file}")
-    
-    # Print summary
-    print(f"\nSummary for {dataset_name}:")
-    print(f"  Dataset size: {dataset_size:.2f} MB")
-    print(f"  Build: {build_result['prep_time_s']:.3f}s (rc={build_result['rc']})")
-    print(f"  Inspect: {insp['inspect_time_s']:.3f}s (rc={insp['rc']})")
-    print(f"  Verify: {vrfy['verify_time_s']:.3f}s (rc={vrfy['rc']})")
-    print(f"  Bench CLI: rc={results['bench_cli']['rc']}")
-    
-    return result_data
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    return info
 
 
-if __name__ == '__main__':
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("source_dir", help="directory to package and benchmark")
+    ap.add_argument("--iterations", type=int, default=3)
+    ap.add_argument("--chunk-size", type=int, default=1024 * 1024)
+    ap.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
+    ap.add_argument("--no-mount", action="store_true", help="skip FUSE mount test")
+    args = ap.parse_args()
+
+    sfs = swiftfs_bin()
+    source = Path(args.source_dir).resolve()
+    if not source.is_dir():
+        sys.exit(f"source directory not found: {source}")
+
+    work = Path(args.work_dir)
+    image = work / "image"
+    results_dir = work / "results"
+    mount_point = work / "mnt"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+
+    print(f"swiftfs binary: {sfs}")
+    print(f"source:         {source} ({dataset_size_mb(source):.2f} MiB)")
+    print(f"image:          {image}")
+    print(f"results:        {results_dir}")
+
+    # 1. Build the image.
+    print("\n[1/3] Building image ...")
+    if image.exists():
+        shutil.rmtree(image)
+    rc, out, err = run_cmd(
+        [sfs, "build", str(source), str(image), "--chunk-size", str(args.chunk_size)]
+    )
+    if rc != 0:
+        sys.exit(f"build failed (rc={rc}): {err.strip()}")
+    print(f"  built image ({dataset_size_mb(image):.2f} MiB)")
+
+    # 2. Run the full benchmark suite, capturing output.
+    print("\n[2/3] Running `swiftfs bench full` ...")
+    rc, out, err = run_cmd(
+        [
+            sfs, "bench", "full",
+            "--image", str(image),
+            "--data-dir", str(source),
+            "--iterations", str(args.iterations),
+            "--chunk-size", str(args.chunk_size),
+        ]
+    )
+    if rc != 0:
+        sys.exit(f"bench failed (rc={rc}): {err.strip()}")
+    print(out)
+    flat, rows = parse_bench_output(out)
+
+    # 3. Attempt a real FUSE mount and read every file.
+    mount_info = {"attempted": False, "reason": "skipped (--no-mount)"}
+    if not args.no_mount:
+        print("\n[3/3] FUSE mount + read test ...")
+        mount_info = try_mount(sfs, str(image), str(mount_point))
+        if mount_info.get("mounted"):
+            n = len(mount_info["reads"])
+            total = sum(r.get("bytes", 0) for r in mount_info["reads"])
+            print(f"  mounted; read {n} files ({total} bytes)")
+        elif mount_info.get("attempted"):
+            print(f"  mount unavailable: {mount_info.get('reason')}")
+        else:
+            print(f"  skipped: {mount_info.get('reason')}")
+    else:
+        print("\n[3/3] FUSE mount test skipped")
+
+    # Store results.
+    record = {
+        "source": str(source),
+        "dataset_size_mb": dataset_size_mb(source),
+        "chunk_size": args.chunk_size,
+        "iterations": args.iterations,
+        "suite_output": out,
+        "suite_summary": flat,
+        "workloads": rows,
+        "mount": mount_info,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    json_path = results_dir / "results.json"
+    with open(json_path, "w") as f:
+        json.dump(record, f, indent=2)
+
+    csv_path = results_dir / "summary.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["workload", "p50_ms", "p99_ms", "ttfa_ms", "backend", "hit", "total_ms"])
+        for row in rows:
+            w.writerow([
+                row.get("workload", ""),
+                row.get("p50", ""),
+                row.get("p99", ""),
+                row.get("ttfa", ""),
+                row.get("backend", ""),
+                row.get("hit", ""),
+                row.get("total", ""),
+            ])
+
+    print(f"\nWrote {json_path}")
+    print(f"Wrote {csv_path}")
+
+
+if __name__ == "__main__":
     main()

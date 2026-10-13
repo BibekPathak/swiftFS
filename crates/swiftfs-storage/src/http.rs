@@ -100,11 +100,7 @@ impl HttpStore {
     }
 
     fn object_url(&self, object: &str) -> String {
-        format!(
-            "{}/{}",
-            self.config.base_url.trim_end_matches('/'),
-            object
-        )
+        format!("{}/{}", self.config.base_url.trim_end_matches('/'), object)
     }
 
     /// Decide whether an error is worth retrying.

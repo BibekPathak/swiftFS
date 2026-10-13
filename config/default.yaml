@@ -1,6 +1,8 @@
 # Default SwiftFS configuration.
-# These values mirror the built-in defaults; provide this file with
-# `--config` once the CLI supports loading it (Phase 3+).
+# These values mirror the built-in defaults. The CLI does not yet load config
+# files; pass the corresponding flags (e.g. `--chunk-size`, `--ram-cache-bytes`,
+# `--no-read-ahead`) instead. This file documents the defaults and the intended
+# future `--config` surface.
 #
 # chunk_size: size in bytes to split files into (default 1 MiB)
 # ram_cache_bytes: upper bound on in-memory chunk cache

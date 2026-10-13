@@ -27,6 +27,8 @@ pub struct MountConfig {
     pub auto_unmount: bool,
     /// Number of `fuser` session worker threads (Linux only).
     pub n_threads: usize,
+    /// Enable sequential read-ahead prefetching.
+    pub read_ahead: bool,
     /// Max time to spend loading the manifest and mounting before giving up.
     pub mount_timeout: Duration,
 }
@@ -40,6 +42,7 @@ impl MountConfig {
             allow_other: false,
             auto_unmount: false,
             n_threads: 4,
+            read_ahead: true,
             mount_timeout: Duration::from_secs(10),
         }
     }
@@ -66,12 +69,7 @@ fn build_chunk_fetcher(
 
     let fetcher_config = FetcherConfig::default();
 
-    Arc::new(ChunkFetcher::new(
-        store,
-        ram,
-        None,
-        fetcher_config,
-    ))
+    Arc::new(ChunkFetcher::new(store, ram, None, fetcher_config))
 }
 
 /// Mount `config.image` at `config.target`, blocking until the filesystem is
@@ -127,7 +125,7 @@ pub fn mount_image(config: &MountConfig) -> Result<(), MountError> {
         fuser_config.n_threads = Some(config.n_threads.max(1));
     }
 
-    let fs = Swiftfs::new(index, fetcher, handle, uid, gid);
+    let fs = Swiftfs::with_read_ahead(index, fetcher, handle, uid, gid, config.read_ahead);
 
     let session = Session::new(fs, &config.target, &fuser_config)?;
     info!(target = %config.target.display(), "filesystem mounted");
@@ -211,7 +209,7 @@ pub fn mount_image_background(config: &MountConfig) -> Result<MountedHandle, Mou
         fuser_config.n_threads = Some(config.n_threads.max(1));
     }
 
-    let fs = Swiftfs::new(index, fetcher, handle, uid, gid);
+    let fs = Swiftfs::with_read_ahead(index, fetcher, handle, uid, gid, config.read_ahead);
 
     let session = Session::new(fs, &config.target, &fuser_config)?.spawn()?;
 
