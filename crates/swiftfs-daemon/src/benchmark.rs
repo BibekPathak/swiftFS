@@ -5,15 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use swiftfs_core::metrics::{self, Counter, Gauge, Histogram};
-use swiftfs_format::load_manifest;
-use swiftfs_cache::RamCache;
+use std::time::Instant;
 
 /// Configuration for a benchmark run.
 #[derive(Debug, Clone)]

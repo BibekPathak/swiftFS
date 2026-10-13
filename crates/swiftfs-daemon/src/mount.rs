@@ -218,6 +218,7 @@ pub fn mount_image_background(config: &MountConfig) -> Result<MountedHandle, Mou
     Ok(MountedHandle { session, runtime })
 }
 
+#[allow(dead_code)]
 fn build_fuser_config(config: &MountConfig) -> Config {
     let mut options = vec![
         MountOption::FSName("swiftfs".to_string()),

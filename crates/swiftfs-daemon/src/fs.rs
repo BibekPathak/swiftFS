@@ -23,14 +23,14 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
-    consts, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
     KernelConfig, LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
+use swiftfs_format::{Node, NodeKind};
 use swiftfs_core::{Result as SfsResult, SwiftfsError, DEFAULT_CHUNK_SIZE};
-use swiftfs_format::{hash_bytes, Node, NodeKind};
-use swiftfs_storage::{ChunkLocation, ChunkStore};
-use swiftfs_cache::{ChunkFetcher, FetcherConfig, RamCache, DiskCache};
+use swiftfs_storage::ChunkLocation;
+use swiftfs_cache::ChunkFetcher;
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
@@ -121,7 +121,6 @@ impl Swiftfs {
 
         // Block on the runtime to perform the async fetches with caching/coalescing.
         // This is safe: the FUSE worker thread blocking is bounded by the fetch
-        /// timeout, and the Tokio runtime is dedicated to this filesystem.
         let data = tokio::task::block_in_place(|| {
             self.rt.block_on(async {
                 let mut out = Vec::with_capacity(size as usize);

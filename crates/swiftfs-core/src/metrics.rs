@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(h.count(), 3);
 
         let mut out = String::new();
-        write_histogram(&mut out, "x_latency_seconds", "test");
+        write_histogram(&mut out, "x_latency_seconds", "test", &h);
         assert!(out.contains("x_latency_seconds_count 3"));
         // Cumulative: first bucket has 1, and +Inf has 3.
         assert!(out.contains("le=\"+Inf\"} 3"));

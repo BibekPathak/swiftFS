@@ -109,10 +109,7 @@ impl HttpStore {
 
     /// Decide whether an error is worth retrying.
     fn is_retryable(err: &SwiftfsError) -> bool {
-        match err {
-            SwiftfsError::Storage(_) => true,
-            _ => false,
-        }
+        matches!(err, SwiftfsError::Storage(_))
     }
 }
 
