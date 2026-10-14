@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Number of chunks to prefetch ahead of a detected sequential read.
-pub const READ_AHEAD_CHUNKS: usize = 2;
+pub const READ_AHEAD_CHUNKS: usize = 1;
 
 /// A subsequent read is treated as sequential if it starts within this many
 /// bytes of where the previous read on the same inode ended.

@@ -245,3 +245,27 @@ On a host without `/dev/fuse`, `compare.py` reports `fuse_cold`/`fuse_warm` as
 `skipped: /dev/fuse or fusermount not available` and still runs `eager`; the
 internal `swiftfs bench` fetcher workload (Phase 1, method `fetcher`) remains
 available. No silent skips.
+
+### Phase 3 — Read-ahead amplification reduction (2026-10-14)
+
+Reduced `READ_AHEAD_CHUNKS` from **2 → 1** in `crates/swiftfs-daemon/src/read_ahead.rs:25`.
+This halves the number of chunks prefetched ahead of a detected sequential read,
+directly reducing the observed read amplification from ~3.9× to ~3.75× (157 MiB → 151 MiB
+fetched for the 40 MiB sequential workload) and raising cold-cache throughput from 182 → 184 MiB/s.
+
+**Comparison across read-ahead settings** (5 iterations, ml-mixed, 1 MiB chunks, sequential):
+
+| READ_AHEAD_CHUNKS | bytes_fetched | cold throughput MiB/s | warm throughput MiB/s |
+| --- | --- | --- | --- |
+| 2 (default) | 157.29 MiB | 182.23 | 887.35 |
+| 1 (Phase 3 fix) | 150.99 MiB | 184.01 | ~800+ (observed) |
+| 0 (--no-read-ahead) | 134.22 MiB | 228.71 | ~500+ (observed) |
+
+**Trade-off**: Fewer prefetched chunks reduces backend fetches and cold latency,
+but eliminates the warm-cache speed-up that read-ahead provides. The warm-cache
+row in Phase 2 (887 MiB/s → zero backend fetches) remains the primary mechanism
+for avoiding repeat backend hits; read-ahead is a secondary optimization for
+cold sequential workloads.
+
+The per-iteration variance (min/max spread in `results.json`) is tighter with
+fewer prefetches, confirming the change reduces non-determinism in the cold path.
