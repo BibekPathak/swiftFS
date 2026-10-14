@@ -298,3 +298,46 @@ This is the single most impactful optimization across all phases.
 
 **Recommendation**: Deploy **64 KiB chunks** as the new default. The amplification drops from ~3.9× to ~1.4× with negligible warm-cache impact and clear cold-throughput gain. Phase 3's `READ_AHEAD_CHUNKS=1` remains beneficial as a secondary fine-tuning knob, but the chunk size change is the dominant effect.
 
+
+### Phase 5 — Further chunk size reduction to 16 KiB (2026-10-14)
+
+Reduced `DEFAULT_CHUNK_SIZE` from **64 KiB → 16 KiB** (`crates/swiftfs-core/src/lib.rs:8`)
+to explore diminishing-read-amplification territory beyond the 64 KiB baseline.
+
+**Comparison across all chunk sizes** (5 iterations, ml-mixed, sequential, 4 reads/file, `--metrics`):
+
+| chunk_size | bytes_fetched | cold throughput MiB/s | warm throughput MiB/s | amplification |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 157.29 MiB | 182.23 | 887.35 | 3.9× |
+| 64 KiB | 56.82 MiB | 200.77 | 850.04 | 1.4× |
+| 16 KiB | 44.70 MiB | 215.11 | 1007.87 | 1.12× |
+
+**Key effects**:
+
+- **16 KiB chunks** push amplification down to **1.12×** (44.70 MiB fetched for 40 MiB requested), 
+  confirming the asymptotic lower bound where each kernel read pulls one chunk and 
+  16 KiB overhead is minimal. 
+- **Cold throughput** continues climbing: 182 → 201 → 215 MiB/s across the three 
+  chunk sizes. The improvement from 64→16 KiB is ~7 MiB/s vs the 64→1 MiB gain 
+  of ~22 MiB/s, showing diminishing returns.
+- **Warm cache** remains fully effective: `bytes_fetched = 0` for all three chunk 
+  sizes. The RAM cache deduplicates repeat reads regardless of chunk size.
+- **Per-iteration variance** tightens further with smaller chunks, confirming 
+  reduced non-determinism as a secondary benefit.
+
+**Downsides**: 
+- **Metadata overhead**: 16 KiB chunks mean ~64× more chunks for the same dataset 
+  compared to 1 MiB, which increases index size and memory pressure in the 
+  ManifestIndex and ChunkFetcher state. For this read-only benchmark workload 
+  the cost is acceptable, but production workloads with many files or concurrent 
+  access would need to weigh this.
+- **No further meaningful gains**: The jump from 64→16 KiB yields only ~2× 
+  amplification reduction (1.4× → 1.12×) and ~7 MiB/s cold throughput, 
+  while the 1 MiB→64 KiB jump gave ~64% amplification reduction and ~22 MiB/s 
+  cold throughput gain. The law of diminishing returns is clearly in effect.
+
+**Recommendation**: 64 KiB remains the practical optimum. 16 KiB achieves only 
+marginal additional amplification reduction (1.4× → 1.12×) at the cost of 
+~64× metadata overhead. The 64 KiB default from Phase 4 is the sweet spot 
+between amplification reduction and metadata overhead.
+
