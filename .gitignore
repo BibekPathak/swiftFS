@@ -10,3 +10,13 @@
 *.swiftfs.img
 /docs/_build/
 /bench-results/*.local.*
+
+# Benchmark harness: raw outputs and generated datasets are never committed.
+# Only the scripts, configs, and compact summaries belong in Git.
+/bench-results/
+/bench-out/
+*.swiftfs-dataset/
+dataset_manifest.json
+mount_iter*.log
+__pycache__/
+*.pyc

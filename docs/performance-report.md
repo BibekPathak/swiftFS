@@ -194,3 +194,54 @@ PY
 PATH="$PWD/target/release:$PATH" python3 bench_suite.py /tmp/swiftfs_phase1/dataset \
     --iterations 5 --work-dir /tmp/swiftfs_phase1/suite
 ```
+
+## Measurement A — mixed workload (baseline comparison)
+
+Dataset: `bench/datasets/ml-mixed.json` — 128 files, 64.00 MiB, pareto size
+distribution, 10% hot, seed 42. Chunk size 1 MiB. Access: **sequential**,
+4 reads/file, 128 KiB read windows (355 reads total, 38.34 MiB requested).
+
+Command:
+
+```sh
+cargo build --release --workspace
+python3 bench/dataset.py /tmp/sfs_ds --config bench/datasets/ml-mixed.json
+python3 bench/compare.py /tmp/sfs_ds --out /tmp/sfs_cmp \
+    --iterations 5 --access sequential --reads-per-file 4 --read-bytes 131072 --metrics
+```
+
+Environment (frozen): identical to the Phase 1 manifest; CPU Intel Core 5 120U,
+kernel 7.1.9-hardened1, workspace filesystem ext2/ext3, work filesystem tmpfs.
+
+| method | prep/mount ms | ttfa ms | total ms | throughput MiB/s | p50 ms | p99 ms | bytes read | bytes fetched | peak RSS KiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| eager | 48.1 | 0.16 | 29.1 | 1320.0 | 0.07 | 0.15 | 40,206,184 | 40,206,184 | n/a |
+| fuse_cold | 10.6 | 2.64 | 210.4 | 182.2 | 0.25 | 3.16 | 40,206,184 | **157,286,400** | 67,652 |
+| fuse_warm | 10.6 | 0.51 | 43.2 | 887.4 | 0.11 | 0.28 | 40,206,184 | **0** | 67,652 |
+
+Medians over 5 iterations (min/max spread is available in `results.json`).
+
+### Measured facts to carry into Phase 3 (profiling)
+
+1. **SwiftFS cold-cache read is ~7× slower end-to-end than eager**
+   (210 ms vs 29 ms) on this RAM-backed workload, and ~7× lower throughput
+   (182 vs 1320 MiB/s). This is the cost of lazy decompression-free chunk fetch
+   + verification + FUSE round-trips.
+2. **Warm cache recovers most of it**: 43 ms total, 887 MiB/s, p50 0.11 ms.
+3. **Measured read amplification**: the workload requested 40.2 MiB, but the
+   cold mount fetched **157.3 MiB** (150 chunks × 1 MiB) — a 3.9× amplification.
+   This is because a 128 KiB kernel read pulls a full 1 MiB chunk, and
+   sequential read-ahead prefetches 2 chunks ahead. This is the clearest
+   optimization target identified by measurement, to be validated in Phase 3
+   before any code change.
+4. **Eager has zero backend fetch** (data already on disk) and no SwiftFS RSS;
+   the mount process uses ~66 MiB RSS for this image.
+5. `bytes_fetched` uses the metrics endpoint and is a hard count of backend
+   fetches × chunk size; it is **not** an estimate.
+
+### FUSE-less reproduction (limited environment)
+
+On a host without `/dev/fuse`, `compare.py` reports `fuse_cold`/`fuse_warm` as
+`skipped: /dev/fuse or fusermount not available` and still runs `eager`; the
+internal `swiftfs bench` fetcher workload (Phase 1, method `fetcher`) remains
+available. No silent skips.

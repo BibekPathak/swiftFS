@@ -1,0 +1,13 @@
+{
+  "name": "ml-mixed",
+  "total_bytes": 67108864,
+  "file_count": 128,
+  "size_distribution": "pareto",
+  "min_bytes": 1024,
+  "max_bytes": 8388608,
+  "pareto_alpha": 1.5,
+  "layout": "dirs",
+  "dirs": 4,
+  "hot_fraction": 0.1,
+  "seed": 42
+}
