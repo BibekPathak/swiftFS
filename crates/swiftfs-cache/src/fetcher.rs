@@ -59,6 +59,10 @@ pub struct FetcherMetrics {
     pub disk_hits: Counter,
     /// Backend fetches actually performed (after coalescing).
     pub backend_fetches: Counter,
+    /// Actual bytes returned by the backend and verified (sum of chunk lengths,
+    /// excluding cache hits and coalesced joins). This is the true measure of
+    /// backend data movement, as opposed to `backend_fetches * chunk_size`.
+    pub backend_bytes: Counter,
     /// Requests that joined an in-flight fetch instead of starting a new one.
     pub coalesced: Counter,
     /// Integrity failures.
@@ -232,6 +236,7 @@ impl ChunkFetcher {
             }
 
             metrics.backend_fetches.inc();
+            metrics.backend_bytes.add(data.len() as u64);
 
             if let Some(disk) = &disk {
                 if let Err(e) = disk.insert(&hash, &data) {
@@ -245,5 +250,43 @@ impl ChunkFetcher {
             Ok(arc)
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use swiftfs_storage::MemStore;
+
+    /// `backend_bytes` must equal the sum of *actual* returned chunk lengths,
+    /// not `fetches * chunk_size`. A short (tail) chunk proves the difference.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_bytes_counts_actual_lengths_not_chunk_size() {
+        let short = b"tail".to_vec(); // 4 bytes, far below any chunk size
+        let hash = blake3::hash(&short).to_hex().to_string();
+        let mut objects = HashMap::new();
+        objects.insert(hash.clone(), short.clone());
+        let store: Arc<dyn ChunkStore> = Arc::new(MemStore::new(objects));
+
+        let ram = Arc::new(RamCache::new(1 << 20));
+        let fetcher = ChunkFetcher::new(store, ram, None, FetcherConfig::default());
+        let location = ChunkLocation {
+            object: hash.clone(),
+            offset: 0,
+            length: short.len() as u32,
+        };
+
+        let got = fetcher.get(&hash, &location).await.expect("fetch");
+        assert_eq!(got.len(), short.len());
+
+        let m = fetcher.metrics();
+        assert_eq!(m.backend_fetches.get(), 1);
+        assert_eq!(m.backend_bytes.get(), short.len() as u64);
+
+        // A second read hits RAM and must not add backend bytes.
+        let _ = fetcher.get(&hash, &location).await.expect("cached fetch");
+        assert_eq!(m.backend_fetches.get(), 1);
+        assert_eq!(m.backend_bytes.get(), short.len() as u64);
     }
 }

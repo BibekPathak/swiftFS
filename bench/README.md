@@ -13,7 +13,8 @@ datasets are **not** committed; only compact summaries belong in `docs/`.
 | --- | --- |
 | `dataset.py` | Deterministic, configurable synthetic dataset generator + manifest |
 | `compare.py` | Eager-vs-lazy comparison harness (eager, fuse_cold, fuse_warm) |
-| `common.py` | Shared helpers: process/RSS sampling, environment manifest, statistics |
+| `common.py` | Shared helpers: process/RSS/CPU sampling, metrics scraping, statistics |
+| `run_matrix.sh` | Driver for the chunk-size × access-pattern matrix |
 | `datasets/*.json` | Named dataset configurations |
 
 ## Quick start
@@ -30,7 +31,25 @@ python3 bench/compare.py /tmp/sfs_ds \
     --out /tmp/sfs_cmp \
     --iterations 5 \
     --access sequential --reads-per-file 1 --read-bytes 131072 \
-    --metrics
+    --chunk-size 65536 --metrics --validate
+```
+
+`--metrics` enables the daemon `/metrics` endpoint so the harness can measure
+**actual** backend bytes (`swiftfs_backend_bytes_total`) and fetches; without it
+those fields are reported as unknown (`null`), never a fabricated zero.
+`--validate` mounts the image and checks that eager and FUSE return byte-identical
+data for the workload.
+
+Run the full chunk-size × access-pattern matrix (writes raw results to
+git-ignored `bench-out/`):
+
+```sh
+DS=/tmp/ml_large OUT=$PWD/bench-out bash -c '
+  source bench/run_matrix.sh
+  run_cell 1048576 sequential 4 131072 1m_seq
+  run_cell  65536 sequential 4 131072 64k_seq
+  run_cell  16384 sequential 4 131072 16k_seq
+'
 ```
 
 Outputs under `--out`:
@@ -49,15 +68,27 @@ Outputs under `--out`:
   comparison without the tag.
 - **Configurations**:
   - `eager` — dataset `cp -r`'d to a local directory, then read.
-  - `fuse_cold` — fresh SwiftFS mount (empty RAM cache), then read.
-  - `fuse_warm` — the same mount re-read (RAM cache populated by the cold pass).
+  - `fuse_cold` — fresh SwiftFS mount (empty SwiftFS caches), then read.
+  - `fuse_warm` — the same mount re-read (caches populated by the cold pass);
+    this is a *repeat read*, not a cold-throughput peer.
 - **Statistics**: N iterations (default 5); the median is reported with min/max
-  spread. The first pass is not discarded automatically; instead cold and warm
-  are explicitly separated.
-- **Backend fetches** (`bytes_fetched`) are measured from the daemon's
-  `/metrics` endpoint when `--metrics` is given, as a delta around each phase.
-  When disabled, the value is reported as **unknown (blank)**, never `0`.
-- **Peak RSS** comes from `/proc/<pid>/status` (`VmHWM`) of the mount process.
+  spread. Cold and warm are explicitly separated rather than one being discarded.
+- **Backend traffic** is measured from the daemon's `/metrics` endpoint when
+  `--metrics` is given, as a delta around each phase:
+  - `backend_fetches` (`swiftfs_backend_fetches_total`) — fetches after coalescing.
+  - `backend_bytes_actual` (`swiftfs_backend_bytes_total`) — **true** bytes moved.
+  - `backend_bytes_nominal` — `fetches × chunk_size`, an **upper bound** kept only
+    for comparison; it overstates short/tail chunks.
+  - `amplification_actual = backend_bytes_actual / app_bytes`.
+  When `--metrics` is off, these are reported as **unknown (`null`)**, never `0`.
+  For `eager` they are undefined: a plain copy has no backend, so eager is never
+  reported as zero backend traffic.
+- **Equivalence** (`--validate`): every requested range is compared byte-for-byte
+  between the source tree and the mount, with a BLAKE2b checksum.
+- **Timing boundary**: eager `end_to_end_s = prep + read`; FUSE
+  `end_to_end_s = mount + read`.
+- **CPU** (`cpu_s`) is sampled from `/proc/<pid>/stat`; **peak RSS** from
+  `/proc/<pid>/status` (`VmHWM`) of the mount process.
 
 ## Environment caveats (read these)
 

@@ -272,8 +272,14 @@ fewer prefetches, confirming the change reduces non-determinism in the cold path
 
 ### Phase 4 — Chunk size reduction (2026-10-14)
 
-Reduced `DEFAULT_CHUNK_SIZE` from **1 MiB → 64 KiB** (`crates/swiftfs-core/src/lib.rs:8`).
-This is the single most impactful optimization across all phases.
+**Corrected in Phase 6:** this phase varied the harness `--chunk-size` flag only;
+`DEFAULT_CHUNK_SIZE` in `crates/swiftfs-core/src/lib.rs` remained 1 MiB until
+Phase 6. The figures below are `backend_fetches x chunk_size`
+(`backend_bytes_nominal`), an upper bound on bytes moved — not actual backend
+bytes. See Phase 6 for corrected, actual-byte measurements and the decision that
+finally changed the compiled default to 64 KiB.
+
+Varied the harness chunk size to 64 KiB (the compiled default was still 1 MiB):
 
 **Comparison across chunk sizes** (5 iterations, ml-mixed, sequential, 4 reads/file, `--metrics`):
 
@@ -301,8 +307,10 @@ This is the single most impactful optimization across all phases.
 
 ### Phase 5 — Further chunk size reduction to 16 KiB (2026-10-14)
 
-Reduced `DEFAULT_CHUNK_SIZE` from **64 KiB → 16 KiB** (`crates/swiftfs-core/src/lib.rs:8`)
-to explore diminishing-read-amplification territory beyond the 64 KiB baseline.
+**Corrected in Phase 6:** harness `--chunk-size` varied to 16 KiB; compiled
+default unchanged at this point. Figures are nominal (upper-bound) bytes.
+
+Varied the harness chunk size to 16 KiB:
 
 **Comparison across all chunk sizes** (5 iterations, ml-mixed, sequential, 4 reads/file, `--metrics`):
 
@@ -341,3 +349,201 @@ marginal additional amplification reduction (1.4× → 1.12×) at the cost of
 ~64× metadata overhead. The 64 KiB default from Phase 4 is the sweet spot 
 between amplification reduction and metadata overhead.
 
+
+---
+
+# Phase 6 — Audit, 1 GiB ML workload, profiling, and revised default
+
+Date: 2026-10-16. Everything below is measured with the corrected harness. This
+phase supersedes the metric interpretation of Phases 2–5: those phases reported
+`backend_fetches x chunk_size` as if it were bytes moved. That quantity is an
+**upper bound** and is now labelled `backend_bytes_nominal`.
+
+## 6.1 Metric definitions (exact)
+
+The comparison harness now separates these quantities and never conflates them:
+
+| Metric | Definition | Source |
+| --- | --- | --- |
+| `app_bytes` | Useful bytes returned to the reader | harness read loop |
+| `chunk_requests` | Chunk lookups (RAM/disk/backend) | `swiftfs_chunk_requests_total` |
+| `ram_hits` | RAM-cache hits | `swiftfs_ram_cache_hits_total` |
+| `backend_fetches` | Backend fetches after coalescing | `swiftfs_backend_fetches_total` |
+| `backend_bytes_actual` | **True** bytes returned by backend, summed over verified chunk lengths | `swiftfs_backend_bytes_total` |
+| `backend_bytes_nominal` | `backend_fetches x chunk_size` (upper bound) | derived |
+| `amplification_actual` | `backend_bytes_actual / app_bytes` | derived |
+| `amplification_nominal` | `backend_bytes_nominal / app_bytes` | derived |
+
+**Amplification formula.** `amplification_actual = (Σ verified chunk lengths
+returned by the backend after coalescing) / (Σ bytes returned to the reader)`.
+Read-ahead prefetches count: they are real backend fetches. Cache hits and
+coalesced joins do **not** add backend bytes (they are served without a backend
+read). `swiftfs_backend_bytes_total` is incremented in
+`crates/swiftfs-cache/src/fetcher.rs` exactly once per verified backend fetch, by
+`data.len()`.
+
+**Why the old number was wrong.** The image format stores one object per chunk
+(`crates/swiftfs-format/src/builder.rs`), and the last chunk of every file may be
+shorter than `chunk_size`. `fetches x chunk_size` therefore overstates bytes.
+Measured effect on the 1 GiB dataset: at 4 KiB the error is ~0.4% (only 512 tail
+chunks of 262,414), but at 1 MiB with a Pareto ML mix most files are a single
+short chunk, so the nominal figure is a large overestimate. Example: 64 KiB
+sequential cold, nominal 415.6 MB vs **actual 414.1 MB**; amplification 1.62x
+(actual), reported as ~1.63x nominal. The gap widens for large chunks; the fix
+makes the figure honest rather than flattering.
+
+## 6.2 Fairness and equivalence
+
+- **Equivalent useful work.** All configurations execute the *same* generated
+  read list (same files, offsets, lengths). `bench/compare.py --validate` mounts
+  the image and compares every requested range byte-for-byte against the source
+  tree, printing a BLAKE2b checksum. It passes (`equivalent: true`) for the 1 GiB
+  workload.
+- **Equal timing boundary.** Eager now reports `end_to_end_s = prep_s + total_s`
+  (copy + reads); SwiftFS reports `end_to_end_s = mount_s + total_s`. Total
+  workload time is still reported separately so costs can be attributed.
+- **Zero backend ≠ zero data movement.** The Linux page cache may serve reads
+  (`FOPEN_KEEP_CACHE`) with zero SwiftFS traffic. A `backend_bytes_actual = 0`
+  warm row means *no backend reads*, not *no bytes copied*; the harness labels
+  warm rows as *repeat read*.
+- **`bytes_read` renamed `app_bytes`** to avoid implying backend I/O.
+
+## 6.3 Larger workload — 1 GiB ML-style dataset
+
+`bench/datasets/ml-large.json`: 512 files, 1,073,741,824 bytes (1024 MiB),
+pareto α=1.2, 8 shard dirs, 8% hot, seed 1234. Generated with
+`python3 bench/dataset.py /tmp/ml_large --config bench/datasets/ml-large.json`.
+
+Image metadata per chunk size (measured):
+
+| chunk_size | unique chunks | image MiB | manifest bytes |
+| --- | --- | --- | --- |
+| 1 MiB | 1,248 | 1026 | 443,614 |
+| 64 KiB | 16,638 | 1030 | 4,745,488 |
+| 16 KiB | 65,790 | 1043 | 18,490,650 |
+| 4 KiB | 262,414 | 1095 | 73,214,878 |
+
+### Results (5 iterations, medians; `--metrics --validate`)
+
+Cold = fresh mount, empty SwiftFS caches. Warm = same workload repeated.
+`amp` is `amplification_actual`. `mount` is SwiftFS mount time.
+
+| chunk | access | cold ms | fetch | backend MiB | amp | cold MiB/s | warm MiB/s | p99 ms | mount ms | RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 MiB | sequential | 1389 | 986 | 768.6 | 3.00 | 184.4 | 1075 | 3.45 | 10.6 | 320 |
+| 64 KiB | sequential | 771 | 6678 | 414.1 | 1.62 | 332.2 | 1051 | 1.12 | 36.7 | 276 |
+| 16 KiB | sequential | 1251 | 21007 | 327.6 | 1.28 | 204.6 | 1224 | 1.66 | 115.5 | 289 |
+| 4 KiB | sequential | 2239 | 81686 | 318.9 | 1.25 | 114.3 | 987 | 3.07 | 443.4 | 350 |
+| 1 MiB | random | 1652 | 1089 | 817.1 | 4.26 | 116.2 | 1452 | 4.40 | 10.5 | 321 |
+| 64 KiB | random | 1463 | 7881 | 481.9 | 2.51 | 131.2 | 1110 | 1.96 | 36.8 | 280 |
+| 16 KiB | random | 1684 | 23322 | 362.2 | 1.89 | 114.0 | 994 | 2.14 | 115.9 | 291 |
+| 1 MiB | hot | 139 | 74 | 60.4 | 5.90 | 73.9 | 681 | 5.23 | 15.9 | 63 |
+| 64 KiB | hot | 33 | 338 | 21.1 | 2.06 | 309.3 | 1021 | 1.80 | 36.5 | 30 |
+| 16 KiB | hot | 69 | 1033 | 16.1 | 1.57 | 148.0 | 581 | 3.35 | 120.3 | 40 |
+
+Eager (for reference, prep + workload): `cp -r` of 1 GiB takes ~600–720 ms; the
+read workload runs at ~1.5–3.5 GiB/s from tmpfs. Eager `app_bytes` equals the
+requested bytes and it reports no backend figures (undefined).
+
+### Findings
+
+1. **64 KiB maximizes cold throughput** on every access pattern (332 / 131 / 309
+   MiB/s vs 1 MiB's 184 / 116 / 74 and 16 KiB's 205 / 114 / 148).
+2. **Amplification falls monotonically with chunk size** but with strong
+   diminishing returns below 64 KiB: 1 MiB 3.0–5.9x, 64 KiB 1.6–2.5x, 16 KiB
+   1.3–1.9x, 4 KiB 1.25x.
+3. **16 KiB does not beat 64 KiB on throughput**, and costs 3x the mount time
+   (115 vs 37 ms) and 4x the manifest (17.6 vs 4.5 MB).
+4. **1 MiB is clearly worst for lazy loading**: highest amplification, lowest
+   cold throughput, highest p99 — but the lowest mount time and smallest manifest.
+5. **Warm is not always zero.** At 64 KiB sequential the 256 MiB RAM cache cannot
+   retain the full working set across the warm pass, so ~1.4k backend fetches
+   remain. This is expected cache behaviour and is now visible rather than hidden.
+
+### Workloads that could not run
+
+- **2–4 GiB datasets**: not attempted. `/tmp` is tmpfs and the host had <6 GiB
+  free during the run; a 2 GiB dataset plus a 2 GiB image plus smaller-chunk
+  metadata would risk exhausting tmpfs. Recorded as a limitation, not a result.
+- **`--no-read-ahead` on 1 GiB** and additional access mixes were skipped to
+  bound total run time; the read-ahead effect was characterised in Phase 3 on the
+  smaller dataset.
+
+## 6.4 Profiling the 4 KiB regression
+
+Tools `perf`/`strace`/`iostat` are absent (see environment manifest). Profiling
+used wall-clock deltas, `/proc/<pid>/stat` CPU time, `/proc/<pid>/status` RSS,
+and the fetcher's internal counters. Hypothesis (per-chunk fixed cost) was tested
+directly:
+
+| chunk | fetches/sec, cold | wall µs/fetch | CPU s, cold | CPU µs/fetch | mount ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 MiB | 710 | 1511 | 1.78 | 1803 | 10.6 |
+| 64 KiB | 8662 | 133 | 1.45 | 216 | 36.7 |
+| 16 KiB | 16789 | 57 | 1.82 | 87 | 115.5 |
+| 4 KiB | 36485 | 29 | 3.80 | 47 | 443.4 |
+
+**Dominant cost: per-chunk fixed overhead, exposed by chunk count.** At 4 KiB the
+sequential cold pass performs **81,686 backend fetches** vs 986 at 1 MiB — an 83x
+increase. Each fetch incurs an object `open`+`stat`+`seek`+`read` (via
+`spawn_blocking`), a BLAKE3 hash of the bytes, an in-flight-map lock, and a FUSE
+round-trip. Cold wall time tracks fetch count (81,686 × ~29.5 µs ≈ 2.4 s), not
+bytes; CPU time is 3.80 s across 2.4 s wall, i.e. more than one core, confirming
+the path is CPU/syscall-bound rather than storage-bound (data is on tmpfs).
+Mount time also explodes to 443 ms because the **73 MB manifest** with 262k
+chunks must be parsed and indexed into `ManifestIndex`.
+
+**Conclusion.** The 4 KiB regression is structural (fixed per-chunk work), not a
+single hot function. **No optimization is applied**: the only effective fix would
+be to pack multiple logical chunks per object and fetch a multi-chunk range in a
+single syscall/hash, which is a format change (out of scope) and unjustified
+while 64 KiB already meets the throughput goal. This is documented as a
+bottleneck/trade-off, per the "evidence or document" rule.
+
+## 6.5 Revised default chunk size
+
+**Decision: `DEFAULT_CHUNK_SIZE` changed from 1 MiB to 64 KiB**
+(`crates/swiftfs-core/src/lib.rs`).
+
+This is **not** a claim that 64 KiB is "the measured winner" on every axis. The
+data shows:
+
+- **Throughput winner: 64 KiB** (highest cold throughput across sequential,
+  random, and hot) — this is the axis that matters for time-to-useful-work.
+- **Amplification winner: 4 KiB** (1.25x), with 16 KiB close behind (1.28x).
+- **Mount/metadata winner: 1 MiB** (10 ms, 0.4 MB manifest).
+
+64 KiB is chosen because it is the **best balanced point**: it is the cold
+throughput optimum, cuts true amplification from 3.0–5.9x to 1.6–2.5x, keeps
+mount time modest (37 ms) and the manifest small (4.5 MB). Choosing 16 KiB would
+buy ~0.3x lower amplification at the cost of 3x higher mount time and lower cold
+throughput; choosing 4 KiB is rejected outright (CPU-bound regression, 70 MB
+manifest). The previous 1 MiB default had the worst amplification and lowest cold
+throughput of the tested sizes, so raising it to 64 KiB is a clear, measured
+improvement rather than a preference.
+
+## Reproduce this phase
+
+```sh
+cargo build --release --workspace
+python3 bench/dataset.py /tmp/ml_large --config bench/datasets/ml-large.json
+# one cell (repeat for cs in 1048576 65536 16384 4096; access in
+# sequential random hot):
+python3 bench/compare.py /tmp/ml_large --out /tmp/cell \
+    --iterations 5 --access sequential --reads-per-file 4 --read-bytes 131072 \
+    --chunk-size 65536 --metrics --validate
+# or drive the whole matrix:
+DS=/tmp/ml_large ./bench/run_matrix.sh
+```
+
+Raw per-cell JSON/CSV are written under `bench-out/` (git-ignored).
+
+## Limitations (unchanged or newly recorded)
+
+- Data and images live on **tmpfs**; absolute latencies measure memory copy, not
+  disk seek. Relative comparisons between chunk sizes remain valid.
+- The OS page cache cannot be dropped (unprivileged), so eager reads are warm.
+- No `perf`/`strace`/`iostat`; profiling is `/proc`/counter/wall-clock based.
+- One machine, one dataset shape (Pareto ML-style). Other distributions
+  (many tiny files, one huge file) may shift the optimum; not measured here.
+- 2–4 GiB datasets were not run (see 6.3).

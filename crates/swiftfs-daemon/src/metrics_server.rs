@@ -49,6 +49,11 @@ pub fn render(fetcher: &ChunkFetcher) -> String {
         m.backend_fetches.get(),
     );
     counter(
+        "swiftfs_backend_bytes_total",
+        "Actual bytes returned by the backend (sum of verified chunk lengths).",
+        m.backend_bytes.get(),
+    );
+    counter(
         "swiftfs_coalesced_requests_total",
         "Requests that joined an in-flight fetch.",
         m.coalesced.get(),
@@ -146,6 +151,7 @@ mod tests {
         let text = render(&fetcher);
         assert!(text.contains("swiftfs_chunk_requests_total"));
         assert!(text.contains("swiftfs_backend_fetches_total"));
+        assert!(text.contains("swiftfs_backend_bytes_total"));
         assert!(text.contains("swiftfs_chunk_latency_seconds_count"));
     }
 }

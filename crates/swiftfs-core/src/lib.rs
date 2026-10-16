@@ -5,7 +5,15 @@
 //! the FUSE daemon.
 
 /// Size of a SwiftFS chunk in bytes unless overridden at build time.
-pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
+///
+/// 64 KiB is the measured cold-read throughput optimum on the reference
+/// ML-artifact workload (1 GiB, sequential/random/hot), and cuts true backend
+/// read amplification from 3.0–5.9x (1 MiB chunks) to 1.6–2.5x while keeping
+/// mount time low (~37 ms) and the manifest small (~4.5 MB). See
+/// `docs/performance-report.md`. Smaller chunks (16 KiB, 4 KiB) lower
+/// amplification further but cost CPU-bound per-chunk overhead and much larger
+/// manifests.
+pub const DEFAULT_CHUNK_SIZE: u32 = 64 * 1024;
 
 pub mod metrics;
 

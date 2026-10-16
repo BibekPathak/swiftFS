@@ -1,0 +1,13 @@
+{
+  "name": "ml-large",
+  "total_bytes": 1073741824,
+  "file_count": 512,
+  "size_distribution": "pareto",
+  "min_bytes": 4096,
+  "max_bytes": 268435456,
+  "pareto_alpha": 1.2,
+  "layout": "dirs",
+  "dirs": 8,
+  "hot_fraction": 0.08,
+  "seed": 1234
+}

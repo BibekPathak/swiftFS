@@ -183,6 +183,83 @@ def percentile(samples: list[float], pct: float) -> float:
     return s[idx]
 
 
+# --------------------------------------------------------------------------
+# SwiftFS metrics endpoint
+# --------------------------------------------------------------------------
+
+# Counters scraped from the daemon's /metrics endpoint. Each is reported as a
+# delta around a measured phase. When the endpoint is disabled every value is
+# ``None`` (unknown), never a fabricated zero.
+METRIC_KEYS = (
+    "swiftfs_chunk_requests_total",
+    "swiftfs_ram_cache_hits_total",
+    "swiftfs_disk_cache_hits_total",
+    "swiftfs_backend_fetches_total",
+    "swiftfs_backend_bytes_total",
+    "swiftfs_coalesced_requests_total",
+    "swiftfs_integrity_failures_total",
+    "swiftfs_fetch_failures_total",
+)
+
+
+def parse_metrics(text: str) -> dict:
+    """Parse a Prometheus-text body into {metric_name: float} (counters)."""
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0].split("{", 1)[0]
+        if name in METRIC_KEYS:
+            try:
+                out[name] = float(parts[1])
+            except ValueError:
+                continue
+    return out
+
+
+def scrape_metrics(port: Optional[int], timeout: float = 3.0) -> Optional[dict]:
+    """Fetch and parse /metrics; ``None`` if disabled or unreachable."""
+    if port is None:
+        return None
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/metrics", timeout=timeout
+        ) as r:
+            return parse_metrics(r.read().decode())
+    except Exception:
+        return None
+
+
+def await_metrics(port: int, timeout_s: float = 5.0) -> bool:
+    """Wait until the metrics endpoint answers, so the pre-read scrape is real."""
+    import urllib.request
+
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < timeout_s:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics", timeout=1
+            ) as r:
+                r.read()
+            return True
+        except Exception:
+            time.sleep(0.01)
+    return False
+
+
+def counter_delta(before: Optional[dict], after: Optional[dict], key: str) -> Optional[float]:
+    """Delta of ``key`` between two scrapes, or ``None`` if either is unknown."""
+    if before is None or after is None:
+        return None
+    return after.get(key, 0.0) - before.get(key, 0.0)
+
+
 class EnvRecorder:
     """Samples VmHWM of a process to capture peak RSS over its lifetime."""
 

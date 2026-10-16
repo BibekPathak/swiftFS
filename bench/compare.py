@@ -49,7 +49,11 @@ from common import (
     EnvRecorder,
     environment_manifest,
     fuse_available,
+    process_cpu_time_s,
     run_cmd,
+    scrape_metrics,
+    await_metrics,
+    counter_delta,
     swiftfs_bin,
     unmount,
 )
@@ -118,7 +122,7 @@ def perform_reads(root: Path, workload: list[dict]) -> dict:
     return {
         "ttfa_ms": ttfa_ms or 0.0,
         "total_s": total_s,
-        "bytes_read": total_bytes,
+        "app_bytes": total_bytes,
         "throughput_mib_s": (total_bytes / MIB / total_s) if total_s > 0 else 0.0,
         "p50_ms": percentile(latencies_ms, 50.0),
         "p99_ms": percentile(latencies_ms, 99.0),
@@ -131,7 +135,22 @@ def perform_reads(root: Path, workload: list[dict]) -> dict:
 # --------------------------------------------------------------------------
 
 def run_eager_iteration(source: Path, workdir: Path, workload: list[dict]) -> dict:
-    """Copy the dataset locally, then run the workload."""
+    """Copy the dataset locally, then run the workload.
+
+    Metrics are reported with explicit, non-conflated names:
+
+    - ``prep_s``  : wall-clock time of ``cp -r`` (data placement).
+    - ``total_s`` : wall-clock time of the read workload only.
+    - ``end_to_end_s`` : ``prep_s + total_s`` (placement + reads), so eager can
+      be compared with FUSE on the same "time until useful work is done"
+      boundary (FUSE ``mount_s + total_s``).
+    - ``app_bytes`` : useful bytes returned to the reader (identical across all
+      configurations by construction).
+    - ``backend_bytes_actual`` / ``backend_fetches`` : **unknown for eager**
+      (``None``): "backend" is not defined for a plain copy. We do not report the
+      copy as zero backend traffic — that would conflate zero *backend* with zero
+      *data movement*.
+    """
     if workdir.exists():
         shutil.rmtree(workdir)
     t0 = time.perf_counter()
@@ -139,11 +158,20 @@ def run_eager_iteration(source: Path, workdir: Path, workload: list[dict]) -> di
     prep_s = time.perf_counter() - t0
     if rc != 0:
         raise RuntimeError(f"cp -r failed: {err}")
+    cpu0 = process_cpu_time_s(os.getpid())
     metrics = perform_reads(workdir, workload)
+    cpu1 = process_cpu_time_s(os.getpid())
     metrics["prep_s"] = prep_s
+    metrics["end_to_end_s"] = prep_s + metrics["total_s"]
     metrics["method"] = "eager"
-    # Eager has no cache tier of its own; bytes fetched == bytes read.
-    metrics["bytes_fetched"] = metrics["bytes_read"]
+    if cpu0 and cpu1:
+        metrics["cpu_s"] = (cpu1[0] + cpu1[1]) - (cpu0[0] + cpu0[1])
+    metrics["backend_bytes_actual"] = None
+    metrics["backend_bytes_nominal"] = None
+    metrics["backend_fetches"] = None
+    metrics["chunk_requests"] = None
+    metrics["ram_hits"] = None
+    metrics["coalesced"] = None
     return metrics
 
 
@@ -181,6 +209,34 @@ def _await_mount(proc: subprocess.Popen, mnt: Path, timeout_s: float = 15.0) -> 
     raise RuntimeError(f"mount did not appear: {detail.strip()}")
 
 
+def _apply_backend_deltas(rec: dict, before: dict | None, after: dict | None,
+                          chunk_size: int) -> None:
+    """Fill backend/cache metric deltas for one measured phase.
+
+    All values are ``None`` (unknown) when the metrics endpoint is disabled, so a
+    disabled scrape is never mistaken for measured zero traffic.
+    """
+    rec["chunk_requests"] = counter_delta(before, after, "swiftfs_chunk_requests_total")
+    rec["ram_hits"] = counter_delta(before, after, "swiftfs_ram_cache_hits_total")
+    rec["backend_fetches"] = counter_delta(before, after, "swiftfs_backend_fetches_total")
+    rec["backend_bytes_actual"] = counter_delta(before, after, "swiftfs_backend_bytes_total")
+    rec["coalesced"] = counter_delta(before, after, "swiftfs_coalesced_requests_total")
+    # Nominal bytes: what the old harness reported (fetches x chunk_size). Kept
+    # for comparison but explicitly labelled as an upper bound on chunk bytes.
+    bf = rec["backend_fetches"]
+    rec["backend_bytes_nominal"] = (bf * chunk_size) if bf is not None else None
+    # Amplification: actual backend bytes moved per useful application byte.
+    app = rec.get("app_bytes")
+    if app and rec["backend_bytes_actual"] is not None:
+        rec["amplification_actual"] = rec["backend_bytes_actual"] / app
+    else:
+        rec["amplification_actual"] = None
+    if app and rec["backend_bytes_nominal"] is not None:
+        rec["amplification_nominal"] = rec["backend_bytes_nominal"] / app
+    else:
+        rec["amplification_nominal"] = None
+
+
 def run_fuse_iterations(sfs: str, image: Path, mnt: Path, workload: list[dict],
                         extra: list[str], metrics_port: int | None,
                         iteration: int, out: Path, chunk_size: int) -> dict:
@@ -191,31 +247,29 @@ def run_fuse_iterations(sfs: str, image: Path, mnt: Path, workload: list[dict],
     try:
         mount_s = _await_mount(proc, mnt)
         if metrics_port is not None:
-            _await_metrics(metrics_port)
-        # Baseline fetch count immediately after mount (expected 0: no reads yet).
-        # When the metrics endpoint is disabled, backend fetches are UNKNOWN —
-        # reported as None, never as a fabricated 0.
-        base = _scrape_backend_fetches(metrics_port)
-        # Cold: cache is empty immediately after mount.
+            await_metrics(metrics_port)
+        # Baseline scrape immediately after mount (expected: no backend traffic yet).
+        base = scrape_metrics(metrics_port)
+        # Cold: SwiftFS caches are empty immediately after mount. The kernel page
+        # cache may still serve some reads (FOPEN_KEEP_CACHE); that shows up as
+        # zero SwiftFS chunk requests, not zero data movement.
+        cpu0 = process_cpu_time_s(proc.pid)
         cold = perform_reads(mnt, workload)
+        cpu1 = process_cpu_time_s(proc.pid)
+        after_cold = scrape_metrics(metrics_port)
         cold["mount_s"] = mount_s
         cold["method"] = "fuse_cold"
-        if metrics_port is not None:
-            after_cold = _scrape_backend_fetches(metrics_port)
-            cold["bytes_fetched"] = max(0, after_cold - base) * chunk_size
-        else:
-            after_cold = None
-            cold["bytes_fetched"] = None
-        # Warm: repeat the same workload against the now-populated RAM cache.
+        cold["end_to_end_s"] = mount_s + cold["total_s"]
+        if cpu0 and cpu1:
+            cold["cpu_s"] = (cpu1[0] + cpu1[1]) - (cpu0[0] + cpu0[1])
+        _apply_backend_deltas(cold, base, after_cold, chunk_size)
+        # Warm ("repeat read"): same workload against the now-populated caches.
         warm = perform_reads(mnt, workload)
+        after_warm = scrape_metrics(metrics_port)
         warm["mount_s"] = mount_s
         warm["method"] = "fuse_warm"
-        if metrics_port is not None:
-            warm["bytes_fetched"] = max(
-                0, _scrape_backend_fetches(metrics_port) - (after_cold or 0)
-            ) * chunk_size
-        else:
-            warm["bytes_fetched"] = None
+        warm["end_to_end_s"] = mount_s + warm["total_s"]
+        _apply_backend_deltas(warm, after_cold, after_warm, chunk_size)
         peak = rec.stop()
         cold["peak_rss_kb"] = peak
         warm["peak_rss_kb"] = peak
@@ -231,49 +285,9 @@ def run_fuse_iterations(sfs: str, image: Path, mnt: Path, workload: list[dict],
             log.close()
 
 
-def _scrape_backend_fetches(port: int | None, timeout: float = 3.0) -> int:
-    """Read swiftfs_backend_fetches_total from the metrics endpoint, if enabled."""
-    if port is None:
-        return 0
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=timeout) as r:
-            text = r.read().decode()
-    except Exception:
-        return 0
-    for line in text.splitlines():
-        if line.startswith("swiftfs_backend_fetches_total "):
-            try:
-                return int(float(line.split()[1]))
-            except (ValueError, IndexError):
-                return 0
-    return 0
-
-
-def _await_metrics(port: int, timeout_s: float = 5.0) -> bool:
-    """Wait until the metrics endpoint answers, so the pre-read scrape is real."""
-    import urllib.request
-
-    t0 = time.perf_counter()
-    while time.perf_counter() - t0 < timeout_s:
-        try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/metrics", timeout=1
-            ) as r:
-                r.read()
-            return True
-        except Exception:
-            time.sleep(0.01)
-    return False
-
-
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
-
-def median_stat(values: list[float]) -> Stat:
-    return Stat.of(values)
 
 
 def run(args) -> dict:
@@ -373,9 +387,36 @@ def run(args) -> dict:
             warm_runs.append(w)
             print(f"  iter {i}: mount={c['mount_s']*1000:.1f}ms "
                   f"cold={c['total_s']*1000:.1f}ms thr={c['throughput_mib_s']:.0f}MiB/s "
+                  f"fetches={c.get('backend_fetches')} "
+                  f"bytes={_fmt_int(c.get('backend_bytes_actual'))} "
                   f"warm={w['total_s']*1000:.1f}ms rss={c.get('peak_rss_kb')}KiB")
         raw["configs"]["fuse_cold"] = _aggregate(cold_runs)
         raw["configs"]["fuse_warm"] = _aggregate(warm_runs)
+
+        if args.validate:
+            print("\n[validate] eager-vs-fuse byte equivalence ...")
+            mnt = out / "mnt"
+            port = _free_port() if args.metrics else None
+            extra = list(base_extra)
+            if port is not None:
+                extra += ["--metrics-listen", f"127.0.0.1:{port}"]
+            proc = _start_mount(sfs, image, mnt, extra, out / "validate_mount.log")
+            try:
+                _await_mount(proc, mnt)
+                eq = validate_equivalence(source, mnt, workload)
+                raw["equivalence"] = eq
+                status = "OK" if eq["equivalent"] else f"MISMATCH {eq['mismatches'][:3]}"
+                print(f"  {eq['reads_checked']} reads, {eq['bytes_checked']} bytes, "
+                      f"blake2b={eq['checksum_blake2b16']} -> {status}")
+            finally:
+                unmount(str(mnt))
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                log = getattr(proc, "_swiftfs_log", None)
+                if log is not None:
+                    log.close()
 
     # ---- persist ----
     with open(out / "results.json", "w") as f:
@@ -394,6 +435,39 @@ def _count_unique_chunks(image: Path) -> int:
         return 0
 
 
+def validate_equivalence(source: Path, mnt: Path, workload: list[dict]) -> dict:
+    """Verify eager and FUSE return byte-identical data for the workload.
+
+    Reads every requested range from the source tree and from the mounted image
+    and compares them. Returns a small report; raises on any mismatch so a
+    comparison cannot silently run on non-equivalent data.
+    """
+    import hashlib
+
+    mismatches: list[str] = []
+    total = 0
+    checksum = hashlib.blake2b(digest_size=16)
+    for r in workload:
+        rel = r["path"]
+        with open(source / rel, "rb") as f:
+            f.seek(r["offset"])
+            a = f.read(r["length"])
+        with open(mnt / rel, "rb") as f:
+            f.seek(r["offset"])
+            b = f.read(r["length"])
+        total += len(a)
+        checksum.update(a)
+        if a != b:
+            mismatches.append(rel)
+    return {
+        "reads_checked": len(workload),
+        "bytes_checked": total,
+        "checksum_blake2b16": checksum.hexdigest(),
+        "mismatches": mismatches,
+        "equivalent": not mismatches,
+    }
+
+
 def _free_port() -> int:
     import socket
 
@@ -407,8 +481,11 @@ def _aggregate(runs: list[dict]) -> dict:
     if not runs:
         return {"skipped": True, "reason": "no runs"}
     keys = [
-        "prep_s", "mount_s", "ttfa_ms", "total_s", "bytes_read", "bytes_fetched",
-        "throughput_mib_s", "p50_ms", "p99_ms", "peak_rss_kb", "n_reads",
+        "prep_s", "mount_s", "end_to_end_s", "ttfa_ms", "total_s", "app_bytes",
+        "chunk_requests", "ram_hits", "backend_fetches", "backend_bytes_actual",
+        "backend_bytes_nominal", "coalesced", "amplification_actual",
+        "amplification_nominal", "throughput_mib_s", "p50_ms", "p99_ms",
+        "cpu_s", "peak_rss_kb", "n_reads",
     ]
     agg: dict = {"method": runs[0].get("method"), "iterations": len(runs)}
     for k in keys:
@@ -424,14 +501,17 @@ def _write_summary_csv(path: Path, raw: dict) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([
-            "method", "n", "prep_ms_median", "mount_ms_median", "ttfa_ms_median",
-            "total_ms_median", "throughput_mib_s_median", "p50_ms_median",
-            "p99_ms_median", "bytes_read_median", "bytes_fetched_median",
-            "peak_rss_kb_median",
+            "method", "n", "prep_ms_median", "mount_ms_median", "e2e_ms_median",
+            "ttfa_ms_median", "total_ms_median", "app_bytes_median",
+            "chunk_requests_median", "ram_hits_median", "backend_fetches_median",
+            "backend_bytes_actual_median", "backend_bytes_nominal_median",
+            "amplification_actual_median", "amplification_nominal_median",
+            "throughput_mib_s_median", "p50_ms_median", "p99_ms_median",
+            "cpu_s_median", "peak_rss_kb_median",
         ])
         for name, agg in raw["configs"].items():
             if agg.get("skipped"):
-                w.writerow([name, "skipped", "", "", "", "", "", "", "", "", "", ""])
+                w.writerow([name, "skipped"] + [""] * 18)
                 continue
             pair = agg.get("method", name)
             w.writerow([
@@ -439,13 +519,21 @@ def _write_summary_csv(path: Path, raw: dict) -> None:
                 agg.get("iterations", ""),
                 _med(agg, "prep_s", 1000.0),
                 _med(agg, "mount_s", 1000.0),
+                _med(agg, "end_to_end_s", 1000.0),
                 _med(agg, "ttfa_ms"),
                 _med(agg, "total_s", 1000.0),
+                _med(agg, "app_bytes"),
+                _med(agg, "chunk_requests"),
+                _med(agg, "ram_hits"),
+                _med(agg, "backend_fetches"),
+                _med(agg, "backend_bytes_actual"),
+                _med(agg, "backend_bytes_nominal"),
+                _med(agg, "amplification_actual"),
+                _med(agg, "amplification_nominal"),
                 _med(agg, "throughput_mib_s"),
                 _med(agg, "p50_ms"),
                 _med(agg, "p99_ms"),
-                _med(agg, "bytes_read"),
-                _med(agg, "bytes_fetched"),
+                _med(agg, "cpu_s"),
                 _med(agg, "peak_rss_kb"),
             ])
 
@@ -459,23 +547,29 @@ def _med(agg: dict, key: str, scale: float = 1.0) -> str:
 
 def _print_markdown(raw: dict) -> None:
     print("\n## Results (method-tagged; medians over iterations)\n")
-    print("| method | prep/mount ms | ttfa ms | total ms | throughput MiB/s | p50 ms | p99 ms | bytes read | bytes fetched | peak RSS KiB |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| method | prep/mount ms | e2e ms | ttfa ms | total ms | app bytes "
+          "| chunk req | backend fetches | backend bytes | ampl. | throughput MiB/s "
+          "| p50 ms | p99 ms | RSS KiB |")
+    print("|" + "---|" * 15)
     for name, agg in raw["configs"].items():
         if agg.get("skipped"):
-            print(f"| {name} | skipped: {agg.get('reason','')} | | | | | | | | |")
+            print(f"| {name} | skipped: {agg.get('reason','')} " + "| " * 13 + "|")
             continue
         m = agg.get("method", name)
         print(
             f"| {m} "
             f"| {_fmt_prep_mount(agg)} "
+            f"| {_num(agg,'end_to_end_s',1000.0)} "
             f"| {_num(agg,'ttfa_ms')} "
             f"| {_num(agg,'total_s',1000.0)} "
+            f"| {_num(agg,'app_bytes')} "
+            f"| {_num(agg,'chunk_requests')} "
+            f"| {_num(agg,'backend_fetches')} "
+            f"| {_num(agg,'backend_bytes_actual')} "
+            f"| {_num(agg,'amplification_actual')} "
             f"| {_num(agg,'throughput_mib_s')} "
             f"| {_num(agg,'p50_ms')} "
             f"| {_num(agg,'p99_ms')} "
-            f"| {_num(agg,'bytes_read')} "
-            f"| {_num(agg,'bytes_fetched')} "
             f"| {_num(agg,'peak_rss_kb')} |"
         )
 
@@ -486,6 +580,10 @@ def _fmt_prep_mount(agg: dict) -> str:
     if "mount_s" in agg:
         return f"{agg['mount_s']['median']*1000:.1f}"
     return ""
+
+
+def _fmt_int(v) -> str:
+    return "" if v is None else f"{int(v)}"
 
 
 def _num(agg: dict, key: str, scale: float = 1.0) -> str:
@@ -512,7 +610,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ram-cache-bytes", type=int, default=0)
     ap.add_argument("--disk-cache-dir", default=None)
     ap.add_argument("--metrics", action="store_true",
-                    help="enable the metrics endpoint to measure backend fetches")
+                    help="enable /metrics to measure actual backend bytes/fetches")
+    ap.add_argument("--validate", action="store_true",
+                    help="verify eager and FUSE return byte-identical data")
     ap.add_argument("--force-mount", action="store_true",
                     help="attempt FUSE even if /dev/fuse is not detected")
     args = ap.parse_args(argv)
